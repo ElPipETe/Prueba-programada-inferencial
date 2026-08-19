@@ -1,0 +1,649 @@
+---
+title: "EP09"
+output: html_document
+date: "2026-07-29"
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Enunciado
+
+Un estudio recolectó medidas anatómicas de 247 hombres y 260 mujeres
+(Heinz et al., 2003). El estudio incluyó nueve mediciones del esqueleto
+(ocho diámetros y una profundidad de hueso a hueso) y doce mediciones
+de grosor (circunferencias) que incluyen el tejido. La siguiente tabla
+detalla las variables registradas en este estudio:
+
+```{r librerias, message=FALSE, warning=FALSE}
+# Paquete para las herramientas de diagnóstico y exploración de
+# modelos de RLM (vif, residualPlots, influencePlot, ncvTest, etc.)
+if (!require(car)) install.packages("car")
+library(car)
+```
+
+# 1. Definir la semilla a utilizar, que corresponde a los últimos cuatro dígitos del RUN (sin considerar el dígito verificador) del integrante de menor edad del equipo.
+
+```{r p1-datos}
+# Carga de los datos entregados (separador ";" y decimales con coma)
+datos <- read.csv2("EP09 Datos.csv")
+
+# Revisión preliminar de la estructura de los datos
+cat("Dimensiones del conjunto de datos:", dim(datos), "\n")
+
+# Distribución por género, con etiquetas legibles en vez de 0/1
+generos <- table(datos$Gender)
+names(generos) <- c("Mujeres (0)", "Hombres (1)")
+cat("\nDistribución por género:\n")
+print(generos)
+
+# Semilla: últimos cuatro dígitos del RUN 
+seed <- 4321
+```
+
+El conjunto de datos contiene 507 registros (247 hombres y 260
+mujeres) y 25 variables, sin valores perdidos. Se fija la semilla en
+4321 para que todo el proceso de muestreo y selección aleatoria que
+sigue sea reproducible.
+
+# 2. Seleccionar una muestra aleatoria de 100 mujeres (si la semilla es un número par) o 100 hombres (si la semilla es impar), y separar 70 casos para trabajar en la construcción de modelos y 30 para su evaluación en datos no vistos.
+
+La semilla 4321 es impar, por lo que se trabaja con una muestra de
+100 hombres (`Gender == 1`).
+
+```{r p2-muestra}
+# Al ser impar, se filtran únicamente los casos de género masculino
+hombres <- datos[datos$Gender == 1, ]
+cat("Casos disponibles de hombres:", nrow(hombres), "\n")
+
+# Muestra aleatoria de 100 hombres
+set.seed(seed)
+muestra <- hombres[sample(nrow(hombres), 100), ]
+
+# División en 70 casos para entrenamiento (construcción de modelos) y
+# 30 para prueba (evaluación en datos no vistos). Se reutiliza la
+# misma semilla para que la partición sea reproducible de forma
+# independiente del paso anterior.
+set.seed(seed)
+i_entrenamiento <- sample(100, 70)
+entrenamiento <- muestra[i_entrenamiento, ]
+prueba <- muestra[-i_entrenamiento, ]
+
+cat("Casos de entrenamiento:", nrow(entrenamiento), "\n")
+cat("Casos de prueba       :", nrow(prueba), "\n")
+```
+
+Se obtuvo una muestra de 100 hombres a partir de los 247 disponibles en
+el estudio, dividida en 70 casos para la construcción de los modelos
+(entrenamiento) y 30 casos que se reservan exclusivamente para evaluar
+su poder predictivo más adelante (prueba), sin que estos últimos
+participen en ninguna decisión de ajuste o selección de variables.
+
+# 3. Seleccionar de forma aleatoria ocho posibles variables predictoras. (sin considerar la estatura).
+
+Del conjunto de candidatas se excluyen `Weight` (variable de
+respuesta), `Height` (el enunciado pide no considerar la estatura) y
+`Gender` (queda constante dentro de la muestra, ya que todos los casos
+son hombres, por lo que no aporta información como predictor).
+
+```{r p3-predictores}
+# Variables excluidas del conjunto de candidatas
+excluidas <- c("Weight", "Height", "Gender")
+candidatas <- setdiff(colnames(entrenamiento), excluidas)
+cat("Variables candidatas disponibles (", length(candidatas), "):\n", sep = "")
+print(candidatas)
+
+# Selección aleatoria de ocho posibles variables predictoras
+set.seed(seed)
+predictores_azar <- sample(candidatas, 8)
+cat("\nVariables predictoras seleccionadas al azar:\n")
+print(predictores_azar)
+```
+
+De las `r length(candidatas)` variables candidatas (todas las
+mediciones antropométricas disponibles, excluyendo `Weight`, `Height`
+y `Gender`), se seleccionaron aleatoriamente ocho posibles predictoras:
+`Wrist.Minimum.Girth`, `Age`, `Shoulder.Girth`, `Hip.Girth`,
+`Thigh.Girth`, `Waist.Girth`, `Knees.diameter` y `Chest.Girth`. Estas
+ocho variables conforman el conjunto desde el cual, en el paso 6, se
+explorarán entre dos y cinco predictores para extender el modelo de
+RLS obtenido en el paso 5.
+
+# 4. Seleccionar, de las otras variables, una que el equipo considere que podría ser útil para predecir la variable Peso (sin considerar la estatura), justificando bien esta selección.
+
+Del conjunto de variables candidatas se descartan las ocho sorteadas en
+el paso 3, ya que estas se reservan para la exploración de predictores
+adicionales del paso 6. Quedan entonces 14 variables restantes.
+
+**Justificación teórica:** El peso corporal corresponde, en gran
+medida, a la suma de la masa de los distintos tejidos del cuerpo
+(músculo, grasa, huesos, órganos, etc.). Las variables de tipo Girth
+(grosor o circunferencia) capturan directamente el volumen de tejido
+blando, músculo y grasa, alrededor de una zona del cuerpo, mientras que
+las variables diameter reflejan principalmente el tamaño del
+esqueleto, una componente del peso mucho más estable y con menor
+variación entre individuos de una misma población. En particular, la
+circunferencia abdominal (aquí medida a la altura del ombligo,
+`Navel.Girth`) es reconocida en la literatura antropométrica como uno
+de los mejores predictores univariados del peso corporal y de la
+adiposidad total, ya que el abdomen concentra buena parte del tejido
+graso y su perímetro responde de forma sensible tanto a cambios de
+grasa como de masa muscular. Por ello se propone `Navel.Girth`
+como predictor para el modelo de RLS.
+
+Para respaldar esta elección con los propios datos, se calcula la
+correlación de Pearson entre `Weight` y cada una de las 14 variables
+candidatas no sorteadas en el paso 3, usando exclusivamente el conjunto
+de entrenamiento:
+
+```{r p4-seleccion}
+# Variables candidatas que no fueron sorteadas en el paso 3
+restantes <- setdiff(candidatas, predictores_azar)
+
+# Correlación de Pearson de cada variable restante con el peso,
+# calculada únicamente sobre el conjunto de entrenamiento
+correlaciones <- sapply(restantes, function(v) cor(entrenamiento[[v]], entrenamiento$Weight))
+correlaciones <- sort(correlaciones, decreasing = TRUE)
+print(round(correlaciones, 3))
+
+# Predictor seleccionado para el modelo de RLS
+predictor_rls <- "Navel.Girth"
+cat("\nPredictor seleccionado para la RLS:", predictor_rls, "\n")
+cat("Correlación con Weight:",
+    round(cor(entrenamiento[[predictor_rls]], entrenamiento$Weight), 3), "\n")
+```
+
+En el conjunto de entrenamiento (n = 70), la correlación de `Weight`
+con las 14 variables restantes va de 0,799 (`Knee.Girth`) a 0,407
+(`Wrists.diameter`). `Navel.Girth` obtiene $r = 0{,}786$, el tercer
+valor más alto, prácticamente empatada con `Knee.Girth`
+y `Bitrochanteric.diameter` ($r=0{,}790$); con $n=70$, diferencias de
+0,01–0,02 en la correlación no son relevantes. A diferencia de
+`Knee.Girth` (grosor de la rodilla) y, sobre todo, de
+`Bitrochanteric.diameter` (diámetro óseo de la cadera), `Navel.Girth`
+mide directamente tejido blando en la zona de mayor acumulación de
+grasa corporal, por lo que sigue siendo la opción mejor justificada
+conceptualmente para representar la composición corporal, y no solo el
+tamaño del esqueleto, como predictor del peso. En consecuencia, se
+selecciona `Navel.Girth` como predictor para el modelo de RLS del paso
+5.
+
+# 5. Usando el entorno R y paquetes estándares, construir un modelo de regresión lineal simple con el predictor seleccionado en el paso anterior.
+
+```{r p5-rls}
+# Modelo de RLS: Weight en función de Navel.Girth, ajustado sobre el
+# conjunto de entrenamiento
+modelo_rls <- lm(Weight ~ Navel.Girth, data = entrenamiento)
+print(summary(modelo_rls))
+
+cat("\nIntervalos de confianza al 95% para los coeficientes:\n")
+print(confint(modelo_rls))
+```
+
+El modelo ajustado es:
+
+$$\widehat{\text{Weight}} = -6,125 + 0,954 \cdot \text{Navel.Girth}$$
+
+El coeficiente de `Navel.Girth` ($\hat{\beta}_1 = 0,954$,
+IC 95% $[0,773;\ 1,136]$) es altamente significativo
+($t(68) = 10,482$, $p = 7,7\times10^{-16}$): por cada centímetro
+adicional de grosor a la altura del ombligo, el modelo predice un
+aumento promedio de 0,954 kg en el peso, manteniendo todo lo demás
+constante. El intercepto ($\hat{\beta}_0 = -6,125$) no es
+significativamente distinto de 0 ($p = 0,451$), lo que es esperable y
+no representa un problema de interpretación en este contexto, ya que
+ningún hombre de la muestra tiene `Navel.Girth` cercano a 0; el
+intercepto es solo un artefacto matemático de la recta y no debe
+interpretarse de forma aislada. El modelo explica el $61,77\%$ de la
+variabilidad del peso ($R^2 = 0,6177$, $R^2_{\text{ajustado}} = 0,6121$),
+con un error estándar residual de 7,21 kg, y la prueba F global
+($F(1,68) = 109,9$, $p = 7,7\times10^{-16}$) confirma que el modelo es
+significativamente mejor que un modelo nulo sin predictores.
+
+```{r p5-grafico}
+# Diagrama de dispersión con la recta de regresión ajustada
+plot(entrenamiento$Navel.Girth, entrenamiento$Weight,
+     main = "RLS: Weight ~ Navel.Girth (entrenamiento)",
+     xlab = "Navel.Girth (cm)", ylab = "Weight (kg)",
+     pch = 19, col = "steelblue")
+abline(modelo_rls, col = "firebrick", lwd = 2)
+```
+
+El gráfico confirma visualmente la relación lineal creciente entre
+ambas variables, consistente con la correlación observada
+($r = 0,786$): los puntos se distribuyen razonablemente cerca de la
+recta ajustada, sin una curvatura evidente. Se observa un caso con
+`Navel.Girth` y `Weight` notoriamente más altos que el resto (esquina
+superior derecha), que conviene tener presente como posible dato
+atípico o influyente al revisar formalmente las condiciones del modelo
+en el paso 7.
+
+Cabe notar además que el modelo solo es válido dentro del rango de
+`Navel.Girth` observado en el entrenamiento (67,0 a 111,8 cm); no debe
+usarse para extrapolar el peso de hombres con una circunferencia
+abdominal fuera de ese rango. En conjunto, esto respalda que
+`Navel.Girth` es un buen candidato para un modelo de RLS.
+
+# 6. Usando herramientas estándares para la exploración de modelos del entorno R, buscar entre dos y cinco predictores de entre las variables seleccionadas al azar en el punto 3, para agregar al modelo de regresión lineal simple obtenido en el paso 5.
+
+Para explorar qué variables, de las ocho sorteadas en el paso 3,
+conviene agregar al modelo de RLS, se usa `step()`
+con selección hacia adelante, partiendo del modelo de RLS del paso
+5 y usando como límite superior el modelo que incluye las
+ocho variables sorteadas:
+
+```{r p6-aic}
+# Modelo superior: RLS + las 8 variables sorteadas en el paso 3
+upper_formula <- as.formula(
+  paste("Weight ~ Navel.Girth +", paste(predictores_azar, collapse = " + "))
+)
+
+# Selección hacia adelante con AIC.
+# Se omite el detalle iterativo (trace = 0): el resultado ya adelanta
+# el problema, que se comenta más abajo.
+modelo_forward_aic <- step(modelo_rls,
+                           scope     = list(lower = ~Navel.Girth, upper = upper_formula),
+                           direction = "forward", trace = 0)
+cat("Predictores agregados con AIC:\n")
+print(setdiff(names(coef(modelo_forward_aic)), c("(Intercept)", "Navel.Girth")))
+```
+
+Usando AIC, `step()` agrega las ocho variables sorteadas, es decir, más
+de las cinco que se permineten. Esto ocurre porque AIC penaliza
+poco la complejidad adicional del modelo y, al estar las variables de
+grosor corporal fuertemente correlacionadas entre sí, casi cualquier
+variable nueva reduce algo la suma de cuadrados residual. Por ello se
+repite la búsqueda usando BIC (`k = log(n)` en `step()`), que
+penaliza con más fuerza el número de parámetros y resulta en un
+criterio más conservador para agregar variables.
+
+```{r p6-bic}
+# Tamaño de la muestra de entrenamiento: se usa como penalización
+# del BIC (k = log(n)), que castiga la complejidad con más fuerza
+# que el AIC por defecto
+n <- nrow(entrenamiento)
+
+# Se repite la selección hacia adelante, ahora con criterio BIC,
+# partiendo de la misma RLS y el mismo límite superior (las 8
+# variables sorteadas)
+modelo_rlm <- step(modelo_rls,
+                   scope     = list(lower = ~Navel.Girth, upper = upper_formula),
+                   direction = "forward", k = log(n))
+print(summary(modelo_rlm))
+```
+
+Con BIC, `step()` se detiene tras agregar **tres** variables, estas corresponden a 
+`Hip.Girth`, `Chest.Girth` y `Knees.diameter`. El modelo de RLM queda:
+
+$$\widehat{\text{Weight}} = -97,612 - 0,079\cdot\text{Navel.Girth} +
+1,030\cdot\text{Hip.Girth} + 0,498\cdot\text{Chest.Girth} +
+1,615\cdot\text{Knees.diameter}$$
+
+y explica el $89,6\%$ de la variabilidad del peso ($R^2 = 0,896$,
+$R^2_{\text{ajustado}} = 0,890$), con un error estándar residual de
+3,85 kg, notablemente menor que el 7,21 kg del modelo de RLS del paso
+5. La prueba F global es altamente significativa
+($F(4,65) = 140,1$, $p < 2\times10^{-16}$), y `Hip.Girth`
+($p = 1,6\times10^{-8}$), `Chest.Girth` ($p = 1,0\times10^{-6}$) y
+`Knees.diameter` ($p = 0,004$) resultan individualmente significativos.
+
+Un punto a destacar es que, en este modelo múltiple, el coeficiente de
+`Navel.Girth` deja de ser significativo ($p = 0,467$) e incluso cambia
+de signo respecto del modelo de RLS. Esto es esperable cuando se
+agregan predictores fuertemente correlacionados entre sí (varias
+medidas de grosor corporal comparten buena parte de la información
+sobre adiposidad y tamaño corporal), y constituye una señal de posible
+multicolinealidad que se evalúa formalmente con el factor de inflación
+de la varianza (VIF) en el paso 7, junto con el resto de las
+condiciones de generalidad del modelo de RLM.
+
+# 7. Evaluar la bondad de ajuste (incluyendo el análisis de casos atípicos y casos influyentes) y la generalidad (condiciones para RLM) de los modelos y "arreglarlos" en caso de que presenten algún problema.
+
+## Modelo de RLS (Weight ~ Navel.Girth)
+
+**Linealidad:**
+
+```{r p7-rls-linealidad}
+# Residuos de Pearson versus el predictor y versus los valores
+# ajustados, con test de curvatura de Tukey (condición de linealidad)
+residualPlots(modelo_rls)
+```
+
+El gráfico de residuos versus `Navel.Girth` y versus los valores
+ajustados no muestra curvatura sistemática: los residuos se reparten
+de forma razonablemente pareja en torno a 0 en todo el rango de la
+variable. El test de curvatura de Tukey que acompaña a
+`residualPlots()` no resulta significativo
+(Tukey $= -0,677$, $p = 0,498$), por lo que no hay evidencia de que la
+relación entre `Navel.Girth` y `Weight` sea distinta de una línea
+recta. La condición de linealidad se satisface.
+
+**Normalidad de los residuos:**
+
+```{r p7-rls-normalidad}
+# Gráfico Q-Q de los residuos estudentizados, con banda de confianza
+qqPlot(modelo_rls, id = FALSE)
+
+# Prueba de Shapiro-Wilk sobre los residuos (condición de normalidad)
+print(shapiro.test(resid(modelo_rls)))
+```
+
+Los residuos se alinean bien con la recta teórica normal, dentro de la
+banda de confianza del gráfico Q-Q. La prueba de Shapiro-Wilk no
+rechaza la normalidad ($W = 0,977$, $p = 0,228$), por lo que la
+condición de normalidad se satisface.
+
+**Homocedasticidad:**
+
+```{r p7-rls-homoced}
+# Prueba de Breusch-Pagan/Cook-Weisberg (condición de homocedasticidad):
+# contrasta si la varianza de los residuos depende de los valores ajustados
+ncvTest(modelo_rls)
+```
+
+La prueba de Breusch-Pagan/Cook-Weisberg no resulta
+significativa ($\chi^2 = 2,001$, $p = 0,157$), por lo que no hay
+evidencia de que la varianza de los residuos cambie con el valor
+ajustado. La condición de homocedasticidad se satisface.
+
+**Independencia:** Cada fila corresponde a un hombre distinto,
+seleccionado de forma aleatoria e independiente de los demás (paso 2);
+no existe un orden temporal ni agrupamiento entre observaciones que
+pudiera generar dependencia. La condición se satisface por el diseño
+de muestreo, más que por una prueba estadística.
+
+**Casos atípicos e influyentes:**
+
+```{r p7-rls-atipicos}
+# Identifica el caso con mayor residuo estudentizado y su
+# significancia corregida por Bonferroni (posibles atípicos)
+outlierTest(modelo_rls)
+
+# Combina apalancamiento (Hat-Values) y distancia de Cook en un
+# solo gráfico, para detectar casos influyentes
+influencePlot(modelo_rls)
+```
+
+`outlierTest()` señala como caso más extremo a la observación con mayor
+residuo estudentizado ($t = 3,44$), pero tras la corrección de
+Bonferroni el valor p no es significativo ($p_{\text{Bonferroni}}
+\approx 0,071$), por lo que no se le considera un atípico estadístico.
+En cuanto a la influencia, la distancia de Cook máxima observada es
+$0,32$, muy por debajo del umbral de alerta ($D>1$), y el gráfico de
+influencia no muestra casos que combinen simultáneamente alto
+apalancamiento y alto residuo. En consecuencia, ningún caso individual
+distorsiona de forma relevante el ajuste, y no es necesario eliminar
+observaciones ni "arreglar" el modelo de RLS: las cuatro condiciones se
+cumplen adecuadamente.
+
+## Modelo de RLM (Weight ~ Navel.Girth + Hip.Girth + Chest.Girth + Knees.diameter)
+
+**Multicolinealidad:**
+
+```{r p7-rlm-vif}
+# Factor de inflación de la varianza de cada predictor
+# (condición de ausencia de multicolinealidad severa)
+vif(modelo_rlm)
+```
+
+Los factores de inflación de la varianza fluctúan entre 1,5
+(`Knees.diameter`) y 6,1 (`Hip.Girth`); `Navel.Girth` obtiene un VIF de
+5,0. Ninguno supera el umbral más estricto de 10 habitualmente usado
+como señal de multicolinealidad severa, pero los valores de
+`Navel.Girth` y `Hip.Girth` sí superan 5, lo que indica una
+multicolinealidad moderada entre ambas variables (de hecho,
+$r_{\text{Navel.Girth, Hip.Girth}} = 0,872$ en el entrenamiento). Esto
+explica directamente el hallazgo del paso 6: `Navel.Girth` deja de ser
+significativa en la RLM no porque no aporte información sobre el peso,
+sino porque esa información queda mayormente capturada por
+`Hip.Girth` una vez que ambas están en el modelo. Se decide **mantener
+`Navel.Girth`** en el modelo, ya que es el predictor base sobre el que
+se construyó la RLS del paso 5 y el VIF no alcanza un nivel severo.
+
+**Linealidad:**
+
+```{r p7-rlm-linealidad}
+# Residuos de Pearson versus cada predictor y versus los valores
+# ajustados, con test de curvatura de Tukey por predictor
+# (condición de linealidad de la RLM)
+residualPlots(modelo_rlm)
+```
+
+Los residuos versus `Navel.Girth`, `Hip.Girth` y `Chest.Girth` no
+muestran curvatura relevante, y sus test de curvatura de Tukey
+individuales no son significativos ($p = 0,671$; $p = 0,729$;
+$p = 0,382$, respectivamente). El de `Knees.diameter` sí resulta
+significativo ($p = 0,047$): su panel de residuos muestra una leve
+curva ascendente hacia los valores más altos de la variable, lo que
+sugiere que la relación entre `Knees.diameter` y `Weight` podría no ser
+perfectamente lineal. Con todo, el test combinado de curvatura para el
+modelo completo no es significativo (Tukey $= 0,575$, $p = 0,565$), y
+de los cuatro test individuales solo uno queda apenas por debajo de
+0,05, si se corrige por comparaciones múltiples (Bonferroni, umbral
+$0,05/4 = 0,0125$), deja de ser significativo. Por eso se interpreta
+como una señal marginal y no como evidencia sólida de no linealidad: no
+amerita transformar `Knees.diameter` ni excluirla del modelo, pero se
+deja como un riesgo menor a tener presente, junto con los que siguen en
+esta sección.
+
+**Normalidad de los residuos:**
+
+```{r p7-rlm-normalidad}
+# Gráfico Q-Q de los residuos estudentizados de la RLM
+qqPlot(modelo_rlm, id = FALSE)
+
+# Prueba de Shapiro-Wilk sobre los residuos (condición de normalidad)
+print(shapiro.test(resid(modelo_rlm)))
+```
+
+Al igual que en la RLS, los residuos se ajustan bien a la normal
+teórica y la prueba de Shapiro-Wilk no rechaza la normalidad
+($W = 0,977$, $p = 0,230$). La condición se satisface.
+
+**Homocedasticidad:**
+
+```{r p7-rlm-homoced}
+# Prueba de Breusch-Pagan/Cook-Weisberg sobre la RLM
+# (condición de homocedasticidad)
+ncvTest(modelo_rlm)
+```
+
+A diferencia de la RLS, aquí la prueba de Breusch-Pagan/Cook-Weisberg
+resulta significativa ($\chi^2 = 5,815$, $p = 0,016$), lo que entrega
+evidencia de heterocedasticidad: la varianza de los residuos tendería a
+crecer con el valor ajustado. No es una violación extrema (el p-valor
+no es órdenes de magnitud menor que 0,05), y no invalida las
+estimaciones de los coeficientes, que siguen siendo insesgadas; afecta
+principalmente la precisión de los errores estándar y, por lo tanto, de
+las pruebas de significancia. Se investiga más abajo si se debe a algún
+caso puntual antes de decidir cómo tratarla.
+
+**Casos atípicos e influyentes:**
+
+```{r p7-rlm-atipicos}
+# Caso con mayor residuo estudentizado y su significancia
+# corregida por Bonferroni (posibles atípicos)
+outlierTest(modelo_rlm)
+
+# Apalancamiento y distancia de Cook combinados (casos influyentes)
+influencePlot(modelo_rlm)
+```
+
+`outlierTest()` identifica un caso con residuo estudentizado
+significativo incluso tras la corrección de Bonferroni ($t = 3,85$,
+$p_{\text{Bonferroni}} \approx 0,019$): el modelo subestima
+notoriamente el peso de esa persona. Sin embargo, su distancia de Cook
+es de solo $0,32$ (máximo observado en el conjunto), muy por debajo del
+umbral de alerta ($D>1$), por lo que **no sería, en rigor, un caso
+influyente**: su eliminación no debería cambiar de forma importante los
+coeficientes estimados. Para confirmarlo y de paso revisar si es la
+causa de la heterocedasticidad detectada, se ajusta el mismo modelo
+excluyendo ese caso:
+
+```{r p7-rlm-sensibilidad}
+# Identifica el caso con mayor |residuo estudentizado| (el detectado
+# por outlierTest) y lo excluye del conjunto de entrenamiento
+caso_atipico <- rownames(entrenamiento)[which.max(abs(rstudent(modelo_rlm)))]
+entrenamiento_sin_atipico <- entrenamiento[rownames(entrenamiento) != caso_atipico, ]
+
+# Se reajusta la misma RLM sin ese caso, para ver si los coeficientes
+# cambian de forma relevante y si la heterocedasticidad se explica
+# por este único punto
+modelo_rlm_sin_atipico <- lm(Weight ~ Navel.Girth + Hip.Girth + Chest.Girth + Knees.diameter,
+                             data = entrenamiento_sin_atipico)
+cat("Caso excluido:", caso_atipico, "\n\n")
+print(summary(modelo_rlm_sin_atipico)$coefficients)
+
+# Comparación del ajuste (R2) con y sin el caso atípico
+cat("\nR2 con el caso   :", round(summary(modelo_rlm)$r.squared, 4), "\n")
+cat("R2 sin el caso    :", round(summary(modelo_rlm_sin_atipico)$r.squared, 4), "\n")
+
+# Se repite la prueba de homocedasticidad sobre el modelo sin el caso
+ncvTest(modelo_rlm_sin_atipico)
+```
+
+Al excluir el caso, los coeficientes y su significancia se mantienen
+prácticamente iguales y el $R^2$ sube solo de forma marginal (de
+0,896 a 0,913), lo que confirma que no es un caso influyente. En
+cuanto a la heterocedasticidad, el `ncvTest` sobre este modelo reducido
+sigue siendo significativo, e incluso algo más
+($\chi^2 = 6,088$, $p = 0,014$), lo que confirma que no es un
+problema causado por este punto aislado, sino un patrón estructural
+presente en todo el conjunto, posiblemente porque el error de
+predicción tiende a crecer algo en los hombres de mayor tamaño
+corporal. Por ello, se opta por mantener el caso y el modelo tal
+como fueron construidos en el paso 6, dejando esta heterocedasticidad
+y la señal marginal de no linealidad de `Knees.diameter` documentadas
+como riesgos del modelo, en lugar de
+manipular los datos para mejorar artificialmente el ajuste o
+transformar la variable de respuesta (lo que complicaría la
+interpretación directa en kilogramos lograda hasta ahora).
+
+## Conclusión del paso 7
+
+El modelo de RLS cumple sin problemas las cuatro condiciones exigidas
+(linealidad, normalidad, homocedasticidad e independencia) y no
+presenta casos atípicos ni influyentes. El modelo de RLM también cumple
+normalidad e independencia, y no tiene casos influyentes (todas las
+distancias de Cook $<1$), pero presenta tres riesgos menores: una multicolinealidad moderada entre `Navel.Girth` y `Hip.Girth` (que ya explica la pérdida de significancia de `Navel.Girth` observada en el paso 6), una
+heterocedasticidad no atribuible a un caso puntual, y una señal
+marginal de no linealidad en `Knees.diameter` que no se sostiene tras
+corregir por comparaciones múltiples. Ninguno de estos tres aspectos
+compromete la validez general del modelo ni justifica eliminar
+variables o casos: el modelo de RLM se mantiene tal como fue construido
+en el paso 6, y su desempeño predictivo real se evalúa a continuación.
+
+# 8. Evaluar el poder predictivo del modelo con los datos no utilizados para construirlo.
+
+Para evaluar el poder predictivo se calculan el error cuadrático medio
+(RMSE) y el error absoluto medio (MAE) tanto en el conjunto de
+entrenamiento como en el de prueba (30 hombres no usados para construir
+los modelos). Si el error en prueba es notoriamente mayor que en
+entrenamiento, es señal de sobreajuste.
+
+```{r p8-rls}
+# Funciones auxiliares para el error cuadrático medio (RMSE) y el
+# error absoluto medio (MAE)
+rmse <- function(y, yhat) sqrt(mean((y - yhat)^2))
+mae  <- function(y, yhat) mean(abs(y - yhat))
+
+# Predicciones de la RLS sobre los mismos datos con los que se
+# construyó (entrenamiento) y sobre los datos no vistos (prueba)
+pred_entrenamiento_rls <- predict(modelo_rls, entrenamiento)
+pred_prueba_rls        <- predict(modelo_rls, prueba)
+
+# Comparación de errores y de la correlación predicho-observado
+cat("Modelo de RLS:\n")
+cat("  RMSE entrenamiento:", round(rmse(entrenamiento$Weight, pred_entrenamiento_rls), 3), "kg\n")
+cat("  RMSE prueba       :", round(rmse(prueba$Weight, pred_prueba_rls), 3), "kg\n")
+cat("  MAE  entrenamiento:", round(mae(entrenamiento$Weight, pred_entrenamiento_rls), 3), "kg\n")
+cat("  MAE  prueba       :", round(mae(prueba$Weight, pred_prueba_rls), 3), "kg\n")
+cat("  Correlación predicho-observado (prueba):",
+    round(cor(prueba$Weight, pred_prueba_rls), 3), "\n")
+```
+
+El modelo de RLS tiene un RMSE de prueba (4,66 kg) incluso menor que
+el de entrenamiento (7,11 kg), y lo mismo ocurre con el MAE (3,91 kg
+frente a 5,71 kg). Esto no indica sobreajuste; se explica porque el
+conjunto de prueba, al ser una submuestra más pequeña (30 casos),
+quedó con un rango de `Weight` más acotado (65,6 a 96,8 kg) que el de
+entrenamiento (53,9 a 116,4 kg): los casos más extremos, incluyendo el
+atípico detectado en el paso 7, quedaron en el entrenamiento, por lo
+que el error en prueba es más optimista. La correlación
+entre el peso predicho y el observado en prueba ($r = 0,86$) confirma
+un buen desempeño predictivo, coherente con el $R^2 = 0,618$ obtenido
+en el entrenamiento.
+
+```{r p8-rlm}
+# Mismo procedimiento que en el chunk anterior, ahora con la RLM
+pred_entrenamiento_rlm <- predict(modelo_rlm, entrenamiento)
+pred_prueba_rlm        <- predict(modelo_rlm, prueba)
+
+cat("Modelo de RLM:\n")
+cat("  RMSE entrenamiento:", round(rmse(entrenamiento$Weight, pred_entrenamiento_rlm), 3), "kg\n")
+cat("  RMSE prueba       :", round(rmse(prueba$Weight, pred_prueba_rlm), 3), "kg\n")
+cat("  MAE  entrenamiento:", round(mae(entrenamiento$Weight, pred_entrenamiento_rlm), 3), "kg\n")
+cat("  MAE  prueba       :", round(mae(prueba$Weight, pred_prueba_rlm), 3), "kg\n")
+cat("  Correlación predicho-observado (prueba):",
+    round(cor(prueba$Weight, pred_prueba_rlm), 3), "\n")
+```
+
+El modelo de RLM tiene un RMSE de prueba (3,89 kg) muy cercano al de
+entrenamiento (3,71 kg), con una diferencia de apenas 0,18 kg (~5%); el
+MAE muestra el mismo patrón (2,99 kg en entrenamiento frente a 3,19 kg
+en prueba). Esta pequeña diferencia es esperable y no constituye
+evidencia de sobreajuste: el modelo generaliza bien a datos no vistos
+a pesar de incorporar tres predictores adicionales. La correlación
+predicho-observado en prueba ($r = 0,905$) es más alta que la de la
+RLS, confirmando que la ganancia de ajuste observada en el
+entrenamiento (paso 6) se traslada también a datos nuevos.
+
+```{r p8-grafico}
+# Peso predicho por la RLS versus peso observado, en el conjunto
+# de prueba (30 casos no usados para construir los modelos)
+plot(prueba$Weight, pred_prueba_rls, pch = 19, col = "steelblue",
+     xlim = range(prueba$Weight),
+     ylim = range(c(pred_prueba_rls, pred_prueba_rlm)),
+     xlab = "Weight observado (prueba)", ylab = "Weight predicho",
+     main = "Predicho vs. observado (conjunto de prueba)")
+
+# Se agregan los puntos de la RLM al mismo gráfico, para comparar
+points(prueba$Weight, pred_prueba_rlm, pch = 17, col = "firebrick")
+
+# Línea de predicción perfecta (predicho = observado)
+abline(0, 1, lty = 2)
+legend("topleft", legend = c("RLS", "RLM"),
+       col = c("steelblue", "firebrick"), pch = c(19, 17))
+```
+
+El gráfico compara, para los 30 casos de prueba, el peso predicho por
+cada modelo contra el peso observado; la línea punteada marca la
+predicción perfecta. Los puntos del modelo de RLM (triángulos rojos)
+se ubican visiblemente más cerca de esa línea que los de la RLS
+(círculos azules), lo que confirma de forma visual la mejora en poder
+predictivo aportada por `Hip.Girth`, `Chest.Girth` y `Knees.diameter`.
+
+## Conclusión general
+
+El proceso completo, desde la selección aleatoria de la muestra de 100
+hombres hasta la validación en datos no vistos, respalda que
+`Navel.Girth` es un predictor razonable pero limitado del peso
+corporal por sí solo ($R^2 = 0,618$ en entrenamiento, RMSE de prueba de
+4,66 kg), y que su extensión a un modelo de RLM con `Hip.Girth`,
+`Chest.Girth` y `Knees.diameter`, seleccionados mediante `step()` con
+criterio BIC, mejora sustancialmente el ajuste ($R^2 = 0,896$) sin comprometer mayormente la generalidad: ambos modelos satisfacen normalidad e independencia,
+ninguno tiene casos influyentes, y el de RLM, pese a una
+multicolinealidad moderada (`Navel.Girth`-`Hip.Girth`), una
+heterocedasticidad no atribuible a un caso puntual y una señal marginal
+de no linealidad en `Knees.diameter` (no significativa tras corregir
+por comparaciones múltiples), mantiene un desempeño predictivo estable
+y consistente entre entrenamiento y prueba (RMSE de 3,71 kg y 3,89 kg,
+respectivamente). En consecuencia, el modelo de RLM
+`Weight ~ Navel.Girth + Hip.Girth + Chest.Girth + Knees.diameter` es
+confiable y claramente preferible al de RLS para predecir el peso de
+hombres a partir de estas medidas corporales, siempre dentro del rango
+de valores observado en la muestra de entrenamiento.

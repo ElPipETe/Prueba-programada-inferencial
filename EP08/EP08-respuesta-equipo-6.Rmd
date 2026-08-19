@@ -1,0 +1,284 @@
+---
+title: "EP08"
+output: html_document
+date: "2026-07-09"
+---
+
+## Pregunta 1
+
+**Enunciado:** Propongan una pregunta de investigación original, que involucre la comparación de la frecuencia en que se observa un evento o característica en dos grupos independientes. Fijando una semilla propia, seleccionen una muestra aleatoria de hogares (100 < n < 150) y respondan la pregunta propuesta utilizando una prueba de permutaciones Monte Carlo. Deben reportar un intervalo de confianza para el estadístico utilizado usando las mismas remuestras.
+
+**Pregunta propuesta:** ¿Es similar la proporción de jefes de hogar hombres vs. mujeres que asiste actualmente a algún establecimiento educacional?
+
+Sea $\pi_H$ la proporción de jefes de hogar hombres que asiste actualmente a algún establecimiento educacional, y $\pi_M$ la proporción análoga para mujeres. Las hipótesis son:
+
+$$H_0: \pi_H - \pi_M = 0$$
+$$H_1: \pi_H - \pi_M \neq 0$$
+
+```{r}
+library(dplyr)
+
+datos <- read.csv("EP08 Datos CASEN 2017.csv", stringsAsFactors = FALSE)
+
+#Fijamos nuestra semilla y obtenemos la muestra
+set.seed(1234)  # reemplazar por la semilla propia del equipo
+n <- 130
+muestra <- datos[sample(nrow(datos), n), c("sexo", "asiste")]
+
+#Variable indicadora 0/1 para "asiste"
+muestra$asiste_num <- ifelse(muestra$asiste == "Si", 1, 0)
+
+x_hombre <- muestra$asiste_num[muestra$sexo == "Hombre"]
+x_mujer  <- muestra$asiste_num[muestra$sexo == "Mujer"]
+
+n_h <- length(x_hombre)
+n_m <- length(x_mujer)
+```
+
+Antes de aplicar una prueba de permutaciones, verificamos si se cumplen las condiciones para una prueba paramétrica de diferencia de proporciones (chi-cuadrado o prop.test), revisando las frecuencias esperadas de la tabla de contingencia:
+
+```{r}
+tabla <- table(muestra$sexo, muestra$asiste)
+tabla
+chisq.test(tabla)$expected
+```
+
+Dado que la asistencia escolar actual es un evento poco frecuente en la población (menos del 5% aproximadamente) y la muestra es de tamaño moderado (100 < n < 150), es esperable que alguna celda de la tabla tenga una frecuencia esperada menor a 5, lo que viola la condición de aproximación normal necesaria para la prueba de proporciones clásica. Por este motivo, optamos por un método de remuestreo.
+
+**Estadístico de interés:** la diferencia de proporciones muestrales.
+
+```{r}
+dif_obs <- mean(x_hombre) - mean(x_mujer)
+dif_obs
+```
+
+### Prueba de permutaciones Monte Carlo
+
+```{r}
+R <- 5000
+pool <- c(x_hombre, x_mujer)
+
+set.seed(1234)
+distribucion_nula <- replicate(R, {
+  perm <- sample(pool)
+  g1 <- perm[1:n_h]
+  g2 <- perm[(n_h + 1):(n_h + n_m)]
+  mean(g1) - mean(g2)
+})
+
+p_valor <- (sum(abs(distribucion_nula) >= abs(dif_obs)) + 1) / (R + 1)
+p_valor
+```
+
+### Intervalo de confianza (usando las mismas remuestras)
+
+Para obtener un intervalo de confianza, invertimos la prueba de permutaciones: buscamos los valores $D_0$ (posibles valores de $\pi_H - \pi_M$) para los cuales la prueba no rechazaría $H_0: \pi_H - \pi_M = D_0$. La idea es desplazar uno de los grupos por $D_0$ y evaluar `dif_obs - D0` contra la distribución de permutación, no $D_0$ directamente.
+
+```{r}
+# Calcula el p-valor de permutaciones para H0: pi_H - pi_M = D0
+p_valor_para_D0 <- function(D0, x1, x2, R = 3000) {
+  x2_desplazado <- x2 + D0  # desplaza el grupo 2 para centrar en D0
+  pool <- c(x1, x2_desplazado)  # une ambos grupos para permutar
+  n1 <- length(x1)
+  n2 <- length(x2_desplazado)
+  estadistico_obs <- mean(x1) - mean(x2_desplazado)  # = dif_obs - D0
+
+  dist_nula <- replicate(R, {
+    perm <- sample(pool)  # permuta las etiquetas de grupo
+    g1 <- perm[1:n1]
+    g2 <- perm[(n1 + 1):(n1 + n2)]
+    mean(g1) - mean(g2)
+  })
+
+  (sum(abs(dist_nula) >= abs(estadistico_obs)) + 1) / (R + 1)  # p-valor de dos colas
+}
+
+alfa <- 0.05
+set.seed(1234)
+
+# Busca el D0 donde el p-valor cruza alfa por abajo (límite inferior del IC)
+limite_inferior <- uniroot(
+  function(D0) p_valor_para_D0(D0, x_hombre, x_mujer) - alfa,
+  lower = dif_obs - 0.3, upper = dif_obs
+)$root
+
+# Busca el D0 donde el p-valor cruza alfa por arriba (límite superior del IC)
+limite_superior <- uniroot(
+  function(D0) p_valor_para_D0(D0, x_hombre, x_mujer) - alfa,
+  lower = dif_obs, upper = dif_obs + 0.3
+)$root
+
+c(limite_inferior, limite_superior)  
+```
+
+### Conclusión
+
+En la muestra de 130 hogares, la diferencia observada entre la proporción de hombres y mujeres jefes de hogar que asiste actualmente a algún establecimiento educacional fue de -0.055 (los hombres muestran una proporción algo menor). Sin embargo, la prueba de permutaciones Monte Carlo entregó un p-valor de 0.249, muy por sobre el nivel de significación habitual de 0.05; además, el intervalo de confianza al 95% para esta diferencia, [-0.133, 0.023], incluye el cero.
+
+En consecuencia, no hay evidencia suficiente para rechazar $H_0$: no podemos concluir que exista una diferencia significativa entre la proporción de jefes de hogar hombres y mujeres que asiste actualmente a algún establecimiento educacional. La diferencia muestral observada es compatible con lo que esperaríamos ver por azar si, en la población, ambas proporciones fueran en realidad iguales.
+
+
+## Pregunta 2
+
+**Enunciado:** Propongan una pregunta de investigación original, que involucre la comparación de las medias de más de dos grupos independientes (más abajo se dan unos ejemplos). Fijando una semilla distinta a la anterior, seleccionen una muestra aleatoria de hogares (200 < n < 300) y respondan la pregunta propuesta utilizando bootstrapping. Solo por ejercicio académico, aplique un análisis post-hoc con bootstrapping aunque este no fuera necesario. Indicación: consideren que el análisis post-hoc debe hacerse con las mismas remuestras usadas para la prueba ómnibus.
+
+
+**Pregunta Propuesta:** Escolaridad según sistema de salud: ¿es similar el promedio de escolaridad (esc) entre quienes pertenecen a FONASA grupo A, FONASA grupo B, FONASA grupo C/D e Isapre (s12, agrupado)?
+
+Sea mu_A, mu_B, mu_CD y mu_I el promedio poblacional de años de escolaridad de las personas en FONASA A, FONASA B, FONASA C/D e Isapre, respectivamente. Las hipótesis son:
+
+H_0: mu_A = mu_B = mu_CD = mu_I
+
+H_1: Al menos una de las medias poblacionnales es distinta a las demas
+
+```{r}
+library(dplyr)
+
+datos <- read.csv("EP08 Datos CASEN 2017.csv", stringsAsFactors = FALSE)
+
+# Limpiamos y agrupamos usando los códigos numéricos de s12 y s13
+df_limpio <- datos %>%
+  select(s12, s13, esc) %>%
+  mutate(esc = as.numeric(esc)) %>%
+  filter(!is.na(esc), !is.na(s12)) %>%
+  mutate(grupo_salud = case_when(
+    s12 == 1 & s13 == 1 ~ "FONASA A",
+    s12 == 1 & s13 == 2 ~ "FONASA B",
+    s12 == 1 & s13 %in% c(3, 4) ~ "FONASA C/D",
+    s12 == 3 ~ "Isapre",
+    TRUE ~ NA_character_
+  )) %>%
+  filter(!is.na(grupo_salud))
+
+# Fijamos la semilla y obtenemos la muestra
+set.seed(4321)  
+n2 <- 250
+muestra2 <- df_limpio[sample(nrow(df_limpio), n2), ]
+
+table(muestra2$grupo_salud)
+```
+
+Antes de aplicar bootstrapping, verificamos si se cumplen las condiciones para una prueba paramétrica de comparación de medias (ANOVA), evaluando la normalidad de los residuos y la homogeneidad de varianzas
+
+
+```{r}
+# Ajustamos el modelo
+modelo <- aov(esc ~ grupo_salud, data = muestra2)
+
+# Prueba de Shapiro-Wilk para normalidad
+shapiro.test(resid(modelo))
+
+# Prueba de Fligner-Killeen para homogeneidad de varianzas
+fligner.test(esc ~ grupo_salud, data = muestra2)
+```
+
+La variable años de escolaridad (esc) está acotada y suele presentar fuertes concentraciones (por ejemplo, a los 12 años por el 4to medio). Esto hace que rara vez se distribuya de forma normal, y al ejecutar un test de Shapiro-Wilk sobre los residuos, es altamente probable obtener un p-valor menor a 0.05, lo que no cumple la condición de normalidad para usar un ANOVA tradicional. Por ello, recurrimos al remuestreo mediante Bootstrapping.
+
+**Estadístico de interés:** el estadístico F de la prueba ANOVA.
+```{r}
+# Calculamos el F observado en nuestra muestra original
+anova_obs <- anova(lm(esc ~ grupo_salud, data = muestra2))
+F_obs <- anova_obs$`F value`[1]
+F_obs
+```
+
+Prueba Ómnibus mediante Bootstrapping
+Para construir la distribución nula por bootstrapping en una prueba ómnibus, debemos forzar que la hipótesis nula sea cierta en nuestra muestra. Para ello, centramos los datos de modo que todos los grupos tengan la misma media global, y luego remuestreamos.
+
+
+```{r}
+# Centrar los datos respecto a la media global para simular H0
+media_global <- mean(muestra2$esc)
+muestra2 <- muestra2 %>%
+  group_by(grupo_salud) %>%
+  mutate(esc_centrada = esc - mean(esc) + media_global) %>%
+  ungroup()
+
+R <- 3000
+F_boot <- numeric(R)
+
+# Matrices para guardar las diferencias del post-hoc
+dif_A_B  <- numeric(R)
+dif_A_CD <- numeric(R)
+dif_A_I  <- numeric(R)
+dif_B_CD <- numeric(R)
+dif_B_I  <- numeric(R)
+dif_CD_I <- numeric(R)
+
+set.seed(4321)
+for(i in 1:R) {
+  # Remuestreo con reemplazo (mismos índices para ómnibus y post-hoc)
+  idx <- sample(1:n2, n2, replace = TRUE)
+  remuestra <- muestra2[idx, ]
+  
+  #Prueba omnibus ANOVA sobre los datos CENTRADOS
+  F_boot[i] <- anova(lm(esc_centrada ~ grupo_salud, data = remuestra))$`F value`[1]
+  
+  #Analisis Post-hoc: Diferencias de medias sobre los datos originales
+  medias_rem <- tapply(remuestra$esc, remuestra$grupo_salud, mean)
+  
+  dif_A_B[i]  <- medias_rem["FONASA A"] - medias_rem["FONASA B"]
+  dif_A_CD[i] <- medias_rem["FONASA A"] - medias_rem["FONASA C/D"]
+  dif_A_I[i]  <- medias_rem["FONASA A"] - medias_rem["Isapre"]
+  dif_B_CD[i] <- medias_rem["FONASA B"] - medias_rem["FONASA C/D"]
+  dif_B_I[i]  <- medias_rem["FONASA B"] - medias_rem["Isapre"]
+  dif_CD_I[i] <- medias_rem["FONASA C/D"] - medias_rem["Isapre"]
+}
+
+# P-valor de la prueba ómnibus
+p_valor_omnibus <- (sum(F_boot >= F_obs) + 1) / (R + 1)
+p_valor_omnibus
+
+```
+
+Análisis Post-hoc con las mismas remuestras
+Dado que la prueba ómnibus indica si alguna media es distinta, el análisis post-hoc con los intervalos de confianza nos indicará exactamente entre qué pares existen diferencias significativas (aquellos intervalos que no contengan el cero).
+
+```{r}
+# Calculamos los intervalos de confianza del 95% empíricos
+alfa_ic <- c(0.025, 0.975)
+
+ic_A_B  <- quantile(dif_A_B, probs = alfa_ic, na.rm = TRUE)
+ic_A_CD <- quantile(dif_A_CD, probs = alfa_ic, na.rm = TRUE)
+ic_A_I  <- quantile(dif_A_I, probs = alfa_ic, na.rm = TRUE)
+ic_B_CD <- quantile(dif_B_CD, probs = alfa_ic, na.rm = TRUE)
+ic_B_I  <- quantile(dif_B_I, probs = alfa_ic, na.rm = TRUE)
+ic_CD_I <- quantile(dif_CD_I, probs = alfa_ic, na.rm = TRUE)
+
+# Resumen de los intervalos
+resultados_posthoc <- data.frame(
+  Comparacion = c("FONASA A - FONASA B", "FONASA A - FONASA C/D", 
+                  "FONASA A - Isapre", "FONASA B - FONASA C/D", 
+                  "FONASA B - Isapre", "FONASA C/D - Isapre"),
+  Limite_Inferior = c(ic_A_B[1], ic_A_CD[1], ic_A_I[1], ic_B_CD[1], ic_B_I[1], ic_CD_I[1]),
+  Limite_Superior = c(ic_A_B[2], ic_A_CD[2], ic_A_I[2], ic_B_CD[2], ic_B_I[2], ic_CD_I[2])
+)
+
+resultados_posthoc <- resultados_posthoc %>%
+  mutate(Significativo = ifelse(Limite_Inferior > 0 | Limite_Superior < 0, "Sí", "No"))
+
+resultados_posthoc
+
+# Mostrar las medias de cada grupo para contextualizar los intervalos
+medias_por_grupo <- muestra2 %>%
+  group_by(grupo_salud) %>%
+  summarise(media_escolaridad = mean(esc), .groups = 'drop')
+
+print("Medias de escolaridad por grupo:")
+medias_por_grupo
+
+```
+
+### Conclusión
+
+En la muestra de 250 hogares, se comparó el promedio de años de escolaridad entre cuatro grupos de sistemas de salud: FONASA A, FONASA B, FONASA C/D e Isapre. Dada la violación de la condición de normalidad de los residuos (característica común en datos de escolaridad que presentan concentraciones en ciertos valores), se utilizó un análisis de varianza mediante bootstrapping para comparar estas medias.
+
+Prueba Ómnibus: La prueba ómnibus por bootstrapping entregó un estadístico F de 9.986 con un p-valor de 0.001, muy inferior al nivel de significación de 0.05. Esto indica que rechazamos la hipótesis nula: existe evidencia significativa de que al menos una de las medias poblacionales de escolaridad difiere entre los grupos de sistemas de salud.
+
+Análisis Post-Hoc: Los intervalos de confianza al 95% para las comparaciones pareadas revelan que:
+- FONASA C/D vs. Isapre: IC = [1.412, 3.519], diferencia significativa (Isapre: 6.99 años vs. FONASA C/D: 9.43 años)
+- FONASA B vs. FONASA C/D: IC = [-3.085, 3.144], no significativo
+- FONASA B vs. Isapre: IC = [-0.696, 5.586], no significativo
+
+En conclusión, existe una diferencia estadísticamente significativa en el promedio de años de escolaridad entre los grupos de sistemas de salud. Específicamente, los afiliados a Isapre presentan un nivel de escolaridad significativamente menor que aquellos en FONASA C/D. Las diferencias entre los otros pares de grupos no son estadísticamente significativas en este análisis.
+

@@ -1,0 +1,1335 @@
+---
+title: "Ep07- Equipo 9"
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+## Enunciado:
+
+En el trabajo de título de una estudiante del DIINF se reportan tiempos
+de ejecución (en milisegundos) y la cercanía con la solución óptima (en
+por ciento) de la mejor solución encontrada con tres versiones de un
+algoritmo genético para resolver instancias del problema del vendedor
+viajero disponibles en repositorios públicos. Ahora debe enfrentar el
+análisis de estos datos, por que está solicitando ayuda de las y los
+estudiantes de Estadística Inferencial.
+
+```{r librerias-datos, message=FALSE, warning=FALSE}
+if (!require(tidyverse))  install.packages("tidyverse")
+if (!require(ggpubr))     install.packages("ggpubr")
+if (!require(car))        install.packages("car")
+if (!require(dunn.test))  install.packages("dunn.test")
+
+library(tidyverse)
+library(ggpubr)
+library(car)
+library(dunn.test)
+
+# Carga del archivo de datos
+datos <- read.csv("EP07 Datos.csv", stringsAsFactors = FALSE)
+
+# Revisión preliminar de la estructura
+cat("Dimensiones del dataset:", dim(datos), "\n")
+cat("Variables:", names(datos), "\n")
+cat("\nDistribucion por numero de nodos:\n")
+print(table(datos$n.nodos))
+```
+
+El conjunto de datos contiene 170 instancias del Problema del Vendedor
+Viajero, con tamaños entre 50 y 130 nodos. Para cada instancia se
+registran el número de nodos (`n.nodos`), el número de aristas
+(`n.aristas`), los tiempos de ejecución en milisegundos de las versiones
+A, B y C (`tiempo.A`, `tiempo.B`, `tiempo.C`), y el porcentaje de
+cercanía a la solución óptima obtenido por cada versión (`mejor.A`,
+`mejor.B`, `mejor.C`).
+
+Los tiempos de ejecución corresponden a variables en **escala de
+razón**, ya que poseen cero absoluto y permiten interpretar
+proporcionalidades. Por su parte, los porcentajes de cercanía a la
+solución óptima se analizan como variables en **escala de intervalo**,
+pues representan diferencias cuantificables en la calidad de las
+soluciones obtenidas.
+
+## Preguntas:
+
+## Pregunta 1:
+
+Observando los datos, la memorista sospecha que hay diferencias
+significativas en el tiempo de ejecución entre las versiones A y B del
+algoritmo cuando las instancias tienen 45 o más nodos. ¿Los datos
+respaldan la intuición de la memorista?
+
+Para responder, filtren los datos para tener las instancias con 45 o más
+nodos y seleccionen las columnas de los tiempos de ejecución de las
+versiones A y B en formato ancho. Usando como semilla el valor 71,
+obtenga muestras aleatorias independientes de 23 tiempos registrados por
+la versión A y 22 tiempos registrados por la versión B del algoritmo.
+Realicen un análisis estadístico pertinente (enunciar hipótesis, revisar
+condiciones, seleccionar pruebas ómnibus y post-hoc según corresponda)
+para responder la pregunta planteada, utilizando pruebas no paramétricas
+de ser necesario.
+
+**Análisis de la pregunta:**
+
+La memorista sospecha que existen diferencias significativas en el
+tiempo de ejecución entre las versiones A y B del algoritmo genético
+cuando las instancias poseen 45 o más nodos. Para analizar esta
+situación se consideran dos muestras aleatorias independientes,
+correspondientes a 23 tiempos de ejecución de la versión A y 22 tiempos
+de la versión B, obtenidas utilizando semilla 71 a partir de las
+instancias que cumplen la condición de tamaño establecida.
+
+**Obtención y manipulación de datos:**
+
+```{r p1-datos}
+# Filtrar instancias con 45 o más nodos 
+datos_45 <- datos[datos$n.nodos >= 45, ]
+
+cat("Instancias con n.nodos >= 45:", nrow(datos_45), "\n")
+cat("Rango de n.nodos en subconjunto:", range(datos_45$n.nodos), "\n")
+
+# Selección de columnas de interés 
+# Se seleccionan únicamente los tiempos de ejecución de las versiones A y B
+# en formato ancho (una columna por versión).
+pool_A1 <- datos_45$tiempo.A   # vector de tiempos versión A
+pool_B1 <- datos_45$tiempo.B   # vector de tiempos versión B
+
+cat("\nTotal de tiempos disponibles en pool A:", length(pool_A1), "\n")
+cat("Total de tiempos disponibles en pool B:", length(pool_B1), "\n")
+
+# Obtención de muestras aleatorias independientes
+# "Independientes" significa que los índices de fila seleccionados para A
+# no guardan ninguna relación con los seleccionados para B: no hay
+# emparejamiento por instancia.
+set.seed(71)
+muestra_A1 <- sample(pool_A1, size = 23)
+muestra_B1 <- sample(pool_B1, size = 22)
+
+# Data frame largo para visualización
+df_p1 <- data.frame(
+  tiempo  = c(muestra_A1, muestra_B1),
+  version = factor(rep(c("A", "B"), c(23, 22)))
+)
+
+cat("\nMuestra A (n = 23):\n"); print(sort(muestra_A1))
+cat("\nMuestra B (n = 22):\n"); print(sort(muestra_B1))
+```
+
+Las muestras obtenidas abarcan tiempos entre 170.917 y 3.484.273 ms para
+la versión A, y entre 386.569 y 4.319.386 ms para la versión B. Estos
+rangos evidencian desde el inicio una dispersión considerable y sugieren
+la presencia de instancias con tiempos de ejecución extremadamente altos
+en comparación con el comportamiento típico de cada versión del
+algoritmo.
+
+**Exploración inicial:**
+
+```{r p1-exploracion}
+# Estadísticos descriptivos 
+desc_p1 <- data.frame(
+  Versión   = c("A", "B"),
+  n         = c(length(muestra_A1), length(muestra_B1)),
+  Media     = c(mean(muestra_A1),   mean(muestra_B1)),
+  Mediana   = c(median(muestra_A1), median(muestra_B1)),
+  DE        = c(sd(muestra_A1),     sd(muestra_B1)),
+  Min       = c(min(muestra_A1),    min(muestra_B1)),
+  Max       = c(max(muestra_A1),    max(muestra_B1)),
+  CV        = c(sd(muestra_A1)/mean(muestra_A1),
+                sd(muestra_B1)/mean(muestra_B1))
+)
+print(desc_p1)
+```
+
+Los estadísticos descriptivos permiten identificar con claridad el
+comportamiento general de ambas muestras.
+
+-   **Versión A:** presenta una media de 1.304.293 ms y una mediana de
+    995.761 ms. La diferencia entre ambas medidas es cercana a 308.500
+    ms (aproximadamente un 31 %), lo que constituye evidencia de
+    asimetría positiva. Además, el coeficiente de variación
+    ($CV = 0{,}82$) indica que la desviación estándar equivale al 82 %
+    de la media, reflejando una dispersión muy elevada.
+
+-   **Versión B:** exhibe una media de 1.987.141 ms y una mediana de
+    1.873.757 ms. La diferencia entre media y mediana alcanza
+    aproximadamente 113.400 ms, mientras que el coeficiente de variación
+    ($CV = 0{,}66$) continúa mostrando una variabilidad considerable.
+
+En términos comparativos, la mediana de la versión B (\~1,88 millones de
+ms) es casi el doble de la observada en la versión A (\~1,00 millón de
+ms), lo que sugiere una diferencia importante en la ubicación central de
+ambas distribuciones.
+
+```{r p1-graficos}
+# Boxplot
+g_box_p1 <- ggboxplot(df_p1,
+                      x       = "version", y = "tiempo",
+                      fill    = "version",
+                      palette = c("steelblue", "darkorange"),
+                      add     = "jitter",
+                      title   = "P1 – Tiempos de ejecución por versión (≥45 nodos)",
+                      xlab    = "Versión del algoritmo",
+                      ylab    = "Tiempo de ejecución (ms)",
+                      ggtheme = theme_pubr()) +
+  theme(legend.position = "none")
+print(g_box_p1)
+
+# Q-Q plots
+g_qq_p1 <- ggqqplot(df_p1, x = "tiempo", facet.by = "version",
+                    color   = "version",
+                    palette = c("steelblue", "darkorange"),
+                    title   = "P1 – Gráficos Q-Q por versión",
+                    xlab    = "Cuantiles teóricos normales",
+                    ylab    = "Cuantiles muestrales",
+                    ggtheme = theme_pubr())
+print(g_qq_p1)
+
+# Histogramas
+g_hist_p1 <- gghistogram(df_p1, x = "tiempo", fill = "version",
+                         palette  = c("steelblue", "darkorange"),
+                         facet.by = "version", bins = 10, add = "mean",
+                         title    = "P1 – Distribución de tiempos por versión",
+                         xlab     = "Tiempo (ms)",
+                         ylab     = "Frecuencia",
+                         ggtheme  = theme_pubr())
+print(g_hist_p1)
+```
+
+Los gráficos refuerzan y complementan lo observado en los estadísticos
+descriptivos.
+
+-   Los **boxplots** presentan bigotes superiores considerablemente más
+    extensos que los inferiores, junto con observaciones aisladas en la
+    zona de valores altos en ambos grupos. Este patrón es característico
+    de distribuciones con asimetría positiva y colas derechas pesadas.
+
+-   Los **gráficos Q-Q** evidencian desviaciones sistemáticas respecto
+    de la recta teórica normal, especialmente en la cola superior. Los
+    cuantiles muestrales más altos exceden ampliamente los cuantiles
+    esperados bajo normalidad, comportamiento típico de distribuciones
+    sesgadas hacia la derecha. Esta curvatura se observa con mayor
+    intensidad en la versión B.
+
+-   Los **histogramas** muestran una alta concentración de observaciones
+    en los rangos inferiores, seguida de una disminución progresiva de
+    las frecuencias hacia valores mayores, confirmando nuevamente la
+    presencia de asimetría positiva en ambas distribuciones.
+
+**Formulación de hipótesis:**
+
+$H_0$: La distribución de los tiempos de ejecución de la versión A es
+igual a la de la versión B para instancias con 45 o más nodos; ambas
+muestras independientes provienen de poblaciones con idéntica
+distribución. $$H_0: F_A(t) = F_B(t) \quad \forall\, t$$
+
+$H_A$: La distribución de los tiempos de ejecución difiere entre las
+versiones A y B para instancias con 45 o más nodos; las muestras
+independientes provienen de poblaciones con distinta distribución.
+$$H_A: F_A(t) \neq F_B(t) \quad \text{para algún } t$$
+
+Se fija un nivel de significación $\alpha = 0{,}05$.
+
+**Revisión de condiciones paramétricas:**
+
+La comparación entre dos muestras independientes de una variable
+numérica continua podría abordarse mediante una prueba *t* para muestras
+independientes, ya sea en su versión clásica (Student) o en la variante
+de Welch.
+
+Sin embargo, la validez de estos procedimientos requiere: *(1)* que la
+variable analizada se mida en escala de razón o intervalo, *(2)* que
+exista independencia entre y dentro de las muestras, *(3)* que las
+distribuciones poblacionales sean aproximadamente normales, o bien que
+los tamaños muestrales sean suficientemente grandes para justificar el
+uso del Teorema Central del Límite, y *(4)*, en el caso específico de la
+prueba *t* de Student, que las varianzas poblacionales sean homogéneas.
+
+A continuación, se evalúa rigurosamente cada una de estas condiciones
+utilizando los datos observados.
+
+```{r p1-condiciones}
+# Condición 3: Normalidad – Shapiro-Wilk
+sw_A1 <- shapiro.test(muestra_A1)
+sw_B1 <- shapiro.test(muestra_B1)
+cat("Shapiro-Wilk  A: W =", round(sw_A1$statistic, 4),
+    " p =", format(sw_A1$p.value, scientific = TRUE, digits = 4), "\n")
+cat("Shapiro-Wilk  B: W =", round(sw_B1$statistic, 4),
+    " p =", format(sw_B1$p.value, scientific = TRUE, digits = 4), "\n")
+
+# Condición 4: Homocedasticidad – Levene
+levene_p1 <- leveneTest(tiempo ~ version, data = df_p1)
+cat("\nPrueba de Levene:\n")
+print(levene_p1)
+cat("Varianza A:", format(var(muestra_A1), scientific = TRUE, digits = 4), "\n")
+cat("Varianza B:", format(var(muestra_B1), scientific = TRUE, digits = 4), "\n")
+cat("Razón s²_A / s²_B:", round(var(muestra_A1)/var(muestra_B1), 4), "\n")
+```
+
+-   **Escala (condición 1):** Los tiempos de ejecución están medidos en
+    milisegundos, por lo que corresponden a una variable cuantitativa en
+    escala de razón. La variable posee cero absoluto y permite
+    interpretar proporcionalidades y diferencias entre observaciones.
+
+-   **Independencia (condición 2):** Las muestras fueron obtenidas
+    mediante muestreo aleatorio simple sin reposición, de manera
+    separada para cada versión del algoritmo. No existe coordinación ni
+    emparejamiento entre los índices de A y B, por lo que las
+    observaciones pueden considerarse independientes tanto dentro de
+    cada grupo como entre grupos.
+
+-   **Normalidad (condición 3):** No se satisface. La prueba de
+    Shapiro–Wilk rechaza la hipótesis de normalidad en ambas muestras:
+    versión A ($W = 0{,}8746$, $p = 0{,}0079$) y versión B
+    ($W = 0{,}9070$, $p = 0{,}0412$). En ambos casos se obtiene
+    $p < \alpha = 0{,}05$, por lo que existe evidencia estadísticamente
+    significativa para concluir que las distribuciones no son normales.
+
+    El estadístico $W$ observado en la versión A ($W \approx 0{,}875$)
+    indica una desviación importante de normalidad, consistente con la
+    curvatura observada en los gráficos Q-Q y con la fuerte asimetría
+    positiva detectada en la exploración descriptiva.
+
+    Además, los tamaños muestrales utilizados ($n_A = 23$, $n_B = 22$)
+    no son lo suficientemente grandes como para invocar con confianza el
+    Teorema Central del Límite.
+
+-   **Homocedasticidad (condición 4):** La prueba de Levene produjo
+    $F(1,\,43) = 1{,}7353$ con $p = 0{,}1947$, por lo que no existe
+    evidencia suficiente para rechazar la igualdad de varianzas. Sin
+    embargo, las varianzas muestrales difieren de manera apreciable en
+    magnitud ($s_A^2 \approx 1{,}14 \times 10^{12}$ ms² y
+    $s_B^2 \approx 1{,}71 \times 10^{12}$ ms²), con una razón aproximada
+    de 0,67. La falta de significancia en Levene podría explicarse por
+    la baja potencia estadística de la prueba bajo tamaños muestrales
+    moderados. En cualquier caso, este aspecto resulta secundario, ya
+    que la violación del supuesto de normalidad basta para invalidar el
+    uso de la prueba *t* bajo este contexto.
+
+Las condiciones requeridas para aplicar una prueba *t* de muestras
+independientes no se satisfacen adecuadamente. La presencia de
+distribuciones fuertemente asimétricas, junto con tamaños muestrales
+moderados y rechazo formal de normalidad, hace inapropiado el uso de
+métodos paramétricos basados en medias. En consecuencia, se utilizará la
+prueba de Wilcoxon de suma de rangos como alternativa no paramétrica
+válida.
+
+**Condiciones de la prueba de Wilcoxon de suma de rangos:**
+
+Para que la prueba de Wilcoxon de suma de rangos sea aplicable con
+validez, deben cumplirse las siguientes condiciones:
+
+1.  **Muestras independientes entre sí:** Las muestras de A y B se
+    obtuvieron mediante muestreo aleatorio simple independiente, sin
+    ningún mecanismo de emparejamiento entre ellas.
+
+2.  **Variable medida en escala ordinal o superior:** Los tiempos de
+    ejecución están en escala de razón, que satisface ampliamente este
+    requisito mínimo.
+
+3.  **Independencia de las observaciones dentro de cada muestra:** Cada
+    tiempo de ejecución corresponde a una instancia del TSP diferente.
+    No existe ninguna relación entre las observaciones de una misma
+    muestra.
+
+Todas las condiciones se cumplen. La prueba puede aplicarse con validez.
+
+**Aplicación de la prueba estadística:**
+
+```{r p1-prueba}
+prueba_p1 <- wilcox.test(muestra_A1, muestra_B1,
+                         alternative = "two.sided",
+                         conf.int    = TRUE,
+                         conf.level  = 0.95)
+# Prueba de Wilcoxon de suma de rangos (Mann-Whitney U)
+print(prueba_p1)
+
+cat("\nEstadístico W         :", prueba_p1$statistic, "\n")
+cat("p-valor               :", format(prueba_p1$p.value, digits = 6), "\n")
+cat("Estimador de ubicación:", round(prueba_p1$estimate, 0), "ms\n")
+cat("IC 95%                : [",
+    round(prueba_p1$conf.int[1], 0), ",",
+    round(prueba_p1$conf.int[2], 0), "] ms\n")
+cat("\nMediana muestral A    :", median(muestra_A1), "ms\n")
+cat("Mediana muestral B    :", median(muestra_B1), "ms\n")
+```
+
+**Interpretación y conclusión:**
+
+Con un nivel de significancia $\alpha = 0{,}05$, la prueba exacta de
+Wilcoxon de suma de rangos produjo un estadístico $W = 162$ y un p-valor
+de $0{,}0390$. Dado que $p = 0{,}0390 < \alpha = 0{,}05$, se rechaza la
+hipótesis nula $H_0{:}\ F_A(t) = F_B(t)\;\forall\,t$.
+
+El valor observado del estadístico indica que las observaciones de la
+versión A tienden a ocupar rangos considerablemente más bajos dentro del
+ordenamiento conjunto de las 45 observaciones. En otras palabras, los
+tiempos de ejecución de la versión A son sistemáticamente menores que
+los de la versión B.
+
+El estimador de Hodges–Lehmann para la diferencia de ubicación entre
+grupos fue de $-487.810$ ms. El signo negativo indica que la versión A
+presenta tiempos de ejecución inferiores a los de la versión B. En
+términos prácticos, esto implica que el tiempo típico de ejecución de A
+se estima en aproximadamente 487.810 ms menos que el de B.
+
+El intervalo de confianza al 95 % para esta diferencia fue
+$[-1.457.727;\ -28.112]$ ms. Como el intervalo no contiene el valor
+cero, el resultado es consistente con el rechazo de la hipótesis nula y
+confirma la existencia de una diferencia estadísticamente significativa
+entre ambas versiones. La amplitud relativamente grande del intervalo
+refleja la elevada variabilidad presente en los tiempos de ejecución,
+especialmente debido a la heterogeneidad en el tamaño y complejidad de
+las instancias del TSP analizadas.
+
+Por lo tanto, existe evidencia estadísticamente significativa para
+concluir que las distribuciones de los tiempos de ejecución de las
+versiones A y B difieren en su ubicación. Bajo el supuesto razonable de
+que ambas distribuciones poseen formas similares, esto equivale a
+afirmar que las medianas poblacionales de los tiempos de ejecución son
+distintas para instancias del TSP con 45 o más nodos.
+
+**Conclusión:** Los resultados respaldan la intuición de la memorista.
+La versión B del algoritmo genético presenta tiempos de ejecución
+significativamente mayores que la versión A cuando se trabaja con
+instancias de 45 o más nodos. La magnitud de la diferencia no solo es
+estadísticamente significativa, sino también relevante desde una
+perspectiva práctica y computacional, ya que implica diferencias del
+orden de varios minutos por ejecución.
+
+## Pregunta 2:
+
+La memorista también sospecha que, al comparar las mismas instancias de
+iguales características, las mejores soluciones encontradas por las
+versiones A y C tienen rendimientos distintos. ¿Estará en lo cierto?
+Para responder, filtren los datos para tener las instancias con 45 o más
+nodos y seleccionen las columnas con el mejor rendimiento de las
+versiones A y C en formato ancho. Usando como semilla el valor 54,
+obtengan una muestra aleatoria de 20 instancias. Realicen un análisis
+estadístico pertinente (enunciar hipótesis, revisar condiciones,
+seleccionar pruebas ómnibus y post-hoc según corresponda) para responder
+la pregunta planteada, utilizando pruebas no paramétricas de ser
+necesario.
+
+**Análisis de la pregunta:**
+
+La memorista sospecha que las versiones A y C del algoritmo genético
+producen porcentajes de cercanía a la solución óptima distintos cuando
+se comparan las mismas instancias del TSP con 45 o más nodos. Se
+enfatiza que las comparaciones se realizan sobre las mismas instancias:
+es decir, para cada instancia seleccionada se dispone del resultado de
+la versión A y del resultado de la versión C, formando pares naturales,
+lo que justifica el uso de una prueba de muestras relacionadas.
+
+**Obtención y manipulación de datos:**
+
+```{r p2-datos}
+# Filtrar instancias con 45 o más nodos
+datos_45_p2 <- datos[datos$n.nodos >= 45, ]
+
+cat("Instancias disponibles con n.nodos >= 45:", nrow(datos_45_p2), "\n")
+cat("Rango de n.nodos en subconjunto:", range(datos_45_p2$n.nodos), "\n")
+
+# Seleccionar columnas de mejor rendimiento versiones A y C (formato ancho)
+pool_p2 <- datos_45_p2[, c("mejor.A", "mejor.C")]
+
+# Muestra aleatoria de 20 instancias (pares emparejados)
+set.seed(54)
+indices_p2 <- sample(nrow(pool_p2), size = 20)
+muestra_p2  <- pool_p2[indices_p2, ]
+muestra_A2  <- muestra_p2$mejor.A
+muestra_C2  <- muestra_p2$mejor.C
+
+# Diferencias intra-par (A - C)
+dif_p2 <- muestra_A2 - muestra_C2
+
+# Data frame largo para visualizacion
+df_p2 <- data.frame(
+  rendimiento = c(muestra_A2, muestra_C2),
+  version     = factor(rep(c("A", "C"), each = 20))
+)
+
+cat("\nMuestra A (n = 20):\n"); print(round(sort(muestra_A2), 4))
+cat("\nMuestra C (n = 20):\n"); print(round(sort(muestra_C2), 4))
+cat("\nDiferencias A - C:\n");  print(round(sort(dif_p2), 4))
+```
+
+Las 170 instancias del conjunto de datos tienen entre 50 y 130 nodos,
+por lo que todas califican para el filtro de 45 o más nodos. Los
+porcentajes de cercanía a la solución óptima de la versión A en la
+muestra seleccionada oscilan entre 93,40 % y 99,56 %, mientras que los
+de la versión C se sitúan entre 92,74 % y 99,81 %. Al calcular las
+diferencias intra-par ($d_i = A_i - C_i$), se obtienen 14 diferencias
+positivas (la versión A supera a C en esa instancia), 6 diferencias
+negativas (C supera a A) y ningún empate exacto, con valores que van de
+$-3{,}64$ a $+6{,}58$ puntos porcentuales.
+
+**Exploración inicial:**
+
+```{r p2-exploracion}
+# Estadísticos descriptivos por versión
+desc_p2 <- data.frame(
+  Version = c("A", "C"),
+  n       = c(length(muestra_A2), length(muestra_C2)),
+  Media   = c(mean(muestra_A2),   mean(muestra_C2)),
+  Mediana = c(median(muestra_A2), median(muestra_C2)),
+  DE      = c(sd(muestra_A2),     sd(muestra_C2)),
+  Min     = c(min(muestra_A2),    min(muestra_C2)),
+  Max     = c(max(muestra_A2),    max(muestra_C2))
+)
+# Estadísticos descriptivos por versión:
+print(desc_p2)
+
+# Estadísticos de las diferencias
+cat("\nEstadísticos de las diferencias (A - C):\n")
+cat("  Media de diferencias   :", round(mean(dif_p2), 4), "\n")
+cat("  Mediana de diferencias :", round(median(dif_p2), 4), "\n")
+cat("  DE de diferencias      :", round(sd(dif_p2), 4), "\n")
+cat("  Min diferencia         :", round(min(dif_p2), 4), "\n")
+cat("  Max diferencia         :", round(max(dif_p2), 4), "\n")
+cat("  Pares con A > C        :", sum(dif_p2 > 0), "de 20\n")
+cat("  Pares con A < C        :", sum(dif_p2 < 0), "de 20\n")
+cat("  Empates                :", sum(dif_p2 == 0), "\n")
+```
+
+La versión A presenta una media de 97,55 % y una mediana de 97,82 %,
+mientras que la versión C exhibe una media de 96,53 % y una mediana de
+97,02 %. La diferencia entre medianas muestrales es de 0,80 puntos
+porcentuales a favor de A. Adicionalmente, la versión A muestra menor
+dispersión ($DE_A = 1{,}80$ pp) que la versión C ($DE_C = 2{,}32$ pp),
+lo que indica que sus resultados son más consistentes entre instancias.
+
+En cuanto a las diferencias intra-par ($d_i = A_i - C_i$), la media es
+de $1{,}017$ pp y la mediana de $0{,}755$ pp, ambas positivas, lo que
+refuerza la tendencia observada a que la versión A supera a C en la
+mayoría de los pares. La desviación estándar de las diferencias es de
+$2{,}90$ pp, con un rango que va de $-3{,}64$ a $+6{,}58$ pp.
+
+```{r p2-graficos, warning=FALSE}
+# Boxplot comparativo
+g_box_p2 <- ggboxplot(df_p2,
+                      x       = "version", y = "rendimiento",
+                      fill    = "version",
+                      palette = c("steelblue", "forestgreen"),
+                      add     = "jitter",
+                      title   = "P2 – Mejor rendimiento por versión (≥45 nodos)",
+                      xlab    = "Versión del algoritmo",
+                      ylab    = "Cercanía a solución óptima (%)",
+                      ggtheme = theme_pubr()) +
+  theme(legend.position = "none")
+print(g_box_p2)
+
+# Q-Q de las diferencias (relevante para prueba de rangos con signo)
+g_qq_p2 <- ggqqplot(data.frame(dif = dif_p2), x = "dif",
+                    title   = "P2 – Q-Q de las diferencias (A - C)",
+                    xlab    = "Cuantiles teóricos normales",
+                    ylab    = "Diferencias observadas",
+                    ggtheme = theme_pubr())
+print(g_qq_p2)
+
+# Histograma de las diferencias
+g_hist_p2 <- gghistogram(data.frame(dif = dif_p2), x = "dif",
+                         fill    = "steelblue",
+                         bins    = 8,
+                         add     = "mean",
+                         title   = "P2 – Distribución de diferencias (A - C)",
+                         xlab    = "Diferencia A - C",
+                         ylab    = "Frecuencia",
+                         ggtheme = theme_pubr())
+print(g_hist_p2)
+```
+
+Los tres gráficos complementan y refuerzan los estadísticos
+descriptivos.
+
+-   El **boxplot comparativo** evidencia que la versión A presenta una
+    mediana más alta y una caja más compacta que la versión C, cuya
+    distribución se extiende considerablemente hacia valores más bajos.
+    La versión C tiene una cola inferior más larga y mayor variabilidad
+    global, lo que es coherente con su mayor desviación estándar.
+
+-   El **gráfico Q-Q de las diferencias** muestra que los puntos se
+    alinean de manera bastante estrecha con la recta teórica normal y
+    permanecen dentro de las bandas de confianza en casi toda su
+    extensión. Esto constituye evidencia visual de que las diferencias
+    intra-par podrían seguir una distribución aproximadamente normal.
+
+-   El **histograma de las diferencias** exhibe una distribución
+    unimodal, con la mayor concentración de valores en el intervalo
+    $[0;\,1{,}5]$ pp y colas simétricas hacia ambos lados. La línea de
+    la media se ubica ligeramente a la derecha de cero, lo que es
+    consistente con la tendencia a favor de la versión A observada en
+    los descriptivos.
+
+**Formulación de hipótesis:**
+
+Sea $d_i = \text{mejor.A}_i - \text{mejor.C}_i$ la diferencia intra-par
+para la instancia $i$, con $i = 1, \ldots, 20$.
+
+$H_0$: El rendimiento medio de las mejores soluciones de la versión A es
+igual al de la versión C al comparar las mismas instancias con 45 o más
+nodos; la media de las diferencias intra-par es igual a cero.
+$$H_0: \mu_d = 0$$
+
+$H_A$: El rendimiento medio de las mejores soluciones difiere entre las
+versiones A y C al comparar las mismas instancias con 45 o más nodos; la
+media de las diferencias intra-par es distinta de cero.
+$$H_A: \mu_d \neq 0$$
+
+Se fija un nivel de significación $\alpha = 0{,}05$.
+
+**Revisión de condiciones paramétricas:**
+
+```{r p2-condiciones}
+# Condición 3: Normalidad de las diferencias – Shapiro-Wilk
+sw_dif_p2 <- shapiro.test(dif_p2)
+cat("Shapiro-Wilk sobre diferencias (A - C):\n")
+cat("  W =", round(sw_dif_p2$statistic, 4),
+    "  p =", format(sw_dif_p2$p.value, scientific = TRUE, digits = 4), "\n")
+```
+
+-   **Escala (condición 1):** Los porcentajes de cercanía están en
+    escala de intervalo, ya que las diferencias entre valores son
+    cuantificables e interpretables. La condición se satisface.
+
+-   **Pares relacionados (condición 2):** Las observaciones de las
+    versiones A y C se obtuvieron sobre la misma instancia del TSP,
+    formando pares naturales. La condición se satisface.
+
+-   **Normalidad de las diferencias (condición 3):** La prueba de
+    Shapiro–Wilk sobre las diferencias $d_i = A_i - C_i$ produce
+    $W = 0{,}963$ y $p = 0{,}606$. Dado que $p \gg \alpha = 0{,}05$, no
+    existe evidencia suficiente para rechazar la normalidad de las
+    diferencias. El valor $W \approx 0{,}963$ indica alta concordancia
+    entre los datos ordenados y los cuantiles esperados bajo normalidad,
+    lo que es consistente con la alineación observada en el gráfico Q-Q.
+    La condición se satisface.
+
+**Conclusión:** Las tres condiciones requeridas para aplicar una prueba
+t de Student para muestras pareadas se satisfacen plenamente. No es
+necesario recurrir a métodos no paramétricos.
+
+**Aplicación de la prueba estadística:**
+
+```{r p2-prueba}
+prueba_p2 <- t.test(muestra_A2, muestra_C2,
+                    paired      = TRUE,
+                    alternative = "two.sided",
+                    conf.level  = 0.95)
+# Prueba t de Student para muestras pareadas
+print(prueba_p2)
+cat("\nEstadístico t         :", round(prueba_p2$statistic, 4), "\n")
+cat("Grados de libertad    :", prueba_p2$parameter, "\n")
+cat("p-valor               :", format(prueba_p2$p.value, digits = 6), "\n")
+cat("Diferencia estimada   :", round(prueba_p2$estimate, 4), "pp\n")
+cat("IC 95%                : [",
+    round(prueba_p2$conf.int[1], 4), ",",
+    round(prueba_p2$conf.int[2], 4), "] pp\n")
+cat("\nMedia muestral A      :", round(mean(muestra_A2), 4), "%\n")
+cat("Media muestral C      :", round(mean(muestra_C2), 4), "%\n")
+cat("Media diferencias     :", round(mean(dif_p2), 4), "pp\n")
+```
+
+**Interpretación y conclusión:**
+
+Con un nivel de significación $\alpha = 0{,}05$, la prueba t de Student
+para muestras pareadas produjo un estadístico $t(19) = 1{,}567$ y un
+p-valor de $0{,}134$. Dado que $p = 0{,}134 > \alpha = 0{,}05$, no se
+rechaza la hipótesis nula $H_0{:}\ \mu_d = 0$.
+
+La diferencia estimada entre medias es de $\hat{\mu}_d = 1{,}017$ pp a
+favor de la versión A, pero el intervalo de confianza al 95 % para esta
+diferencia es $[-0{,}34;\; 2{,}38]$ pp. Como el intervalo contiene el
+valor cero, el resultado es coherente con la no significancia
+estadística: la diferencia observada es compatible con la variabilidad
+esperada bajo la hipótesis de que ambas versiones tienen el mismo
+rendimiento medio.
+
+Aunque descriptivamente la versión A supera a C en 14 de los 20 pares y
+presenta una media ligeramente mayor (97,55 % vs. 96,53 %), esta ventaja
+no alcanza significancia estadística con el tamaño muestral disponible
+($n = 20$). La elevada variabilidad de las diferencias ($DE_d = 2{,}90$
+pp) en relación con su media ($\bar{d} = 1{,}02$ pp) explica la baja
+potencia de la prueba para detectar una diferencia de esta magnitud.
+
+**Conclusión:** Los datos no respaldan la intuición de la memorista. No
+existe evidencia estadísticamente significativa para concluir que las
+versiones A y C del algoritmo genético producen rendimientos distintos
+al comparar las mismas instancias con 45 o más nodos ($t(19) = 1{,}567$,
+$p = 0{,}134$). La diferencia observada podría deberse al azar muestral.
+
+## Pregunta 3:
+
+La memorista sospecha que hay diferencias significativas en el tiempo de
+ejecución entre las versiones del algoritmo cuando las instancias de
+prueba tienen 70 o más nodos. ¿Los datos respaldan la intuición de la
+memorista? 
+
+Para responder, filtren los datos para tener las instancias
+con 70 o más nodos y seleccionen las columnas con los tiempos de
+ejecución registrados (en formato ancho). Usando como semilla el valor
+31, obtengan muestras aleatorias independientes de 17, 13 y 15 tiempos
+registrados por las versiones A, B y C, respectivamente. Realicen un
+análisis estadístico pertinente (enunciar hipótesis, revisar
+condiciones, seleccionar pruebas ómnibus y post-hoc según corresponda)
+para responder la pregunta planteada, utilizando pruebas no paramétricas
+de ser necesario.
+
+**Análisis de la pregunta:**
+
+La memorista sospecha que existen diferencias significativas en los
+tiempos de ejecución entre las tres versiones del algoritmo genético
+cuando las instancias poseen 70 o más nodos. En este caso se dispone de
+tres muestras independientes, una por versión, obtenidas con tamaños
+distintos ($n_A = 17$, $n_B = 13$, $n_C = 15$). La comparación
+simultánea de tres grupos requiere una prueba ómnibus que controle la
+tasa de error global, seguida, si corresponde, de un análisis post-hoc
+para identificar qué pares de versiones difieren.
+
+**Obtención y manipulación de datos:**
+
+```{r p3-datos}
+# Filtrar instancias con 70 o más nodos
+datos_70 <- datos[datos$n.nodos >= 70, ]
+
+cat("Instancias disponibles con n.nodos >= 70:", nrow(datos_70), "\n")
+cat("Rango de n.nodos en subconjunto:", range(datos_70$n.nodos), "\n")
+
+# Pools independientes de tiempos por versión
+pool_A3 <- datos_70$tiempo.A
+pool_B3 <- datos_70$tiempo.B
+pool_C3 <- datos_70$tiempo.C
+
+cat("\nTiempos disponibles – Versión A:", length(pool_A3), "\n")
+cat("Tiempos disponibles – Versión B:", length(pool_B3), "\n")
+cat("Tiempos disponibles – Versión C:", length(pool_C3), "\n")
+
+# Muestras aleatorias independientes con semilla 31
+set.seed(31)
+muestra_A3 <- sample(pool_A3, size = 17)
+muestra_B3 <- sample(pool_B3, size = 13)
+muestra_C3 <- sample(pool_C3, size = 15)
+
+# Data frame largo para análisis y visualización
+df_p3 <- data.frame(
+  tiempo  = c(muestra_A3, muestra_B3, muestra_C3),
+  version = factor(rep(c("A", "B", "C"), c(17, 13, 15)))
+)
+
+cat("\nMuestra A (n=17):\n"); print(sort(muestra_A3))
+cat("\nMuestra B (n=13):\n"); print(sort(muestra_B3))
+cat("\nMuestra C (n=15):\n"); print(sort(muestra_C3))
+```
+
+Las 130 instancias con 70 o más nodos corresponden a los tamaños más
+grandes y complejos del conjunto de datos (entre 70 y 130 nodos), por lo
+que se esperan tiempos de ejecución considerablemente mayores que los
+observados en la Pregunta 1. Los tiempos de las muestras obtenidas
+reflejan esta complejidad: la versión A varía entre 393.150 y 3.009.439
+ms, la versión B entre 796.135 y 4.319.386 ms, y la versión C entre
+451.458 y 2.433.745 ms. En todos los grupos se aprecia una dispersión
+muy elevada, con rangos que abarcan más de 2 millones de milisegundos en
+cada caso. A primera vista, la versión B parece presentar tiempos más
+altos que las otras dos versiones, pero esta impresión debe contrastarse
+formalmente.
+
+**Exploración inicial:**
+
+```{r p3-exploracion}
+# Estadísticos descriptivos por versión
+desc_p3 <- data.frame(
+  Version = c("A", "B", "C"),
+  n       = c(17, 13, 15),
+  Media   = c(mean(muestra_A3), mean(muestra_B3), mean(muestra_C3)),
+  Mediana = c(median(muestra_A3), median(muestra_B3), median(muestra_C3)),
+  DE      = c(sd(muestra_A3), sd(muestra_B3), sd(muestra_C3)),
+  Min     = c(min(muestra_A3), min(muestra_B3), min(muestra_C3)),
+  Max     = c(max(muestra_A3), max(muestra_B3), max(muestra_C3)),
+  CV      = c(sd(muestra_A3)/mean(muestra_A3),
+              sd(muestra_B3)/mean(muestra_B3),
+              sd(muestra_C3)/mean(muestra_C3))
+)
+cat("Estadísticos descriptivos por versión:\n")
+print(desc_p3)
+```
+
+Los estadísticos descriptivos revelan diferencias importantes entre las
+tres versiones. La versión B presenta la mayor media (2.228.934 ms
+$\approx$ 37 min) y la mayor mediana (2.116.645 ms $\approx$ 35 min),
+valores que aproximadamente duplican los de las versiones A y C. La
+versión A muestra una media de 1.349.814 ms y una mediana de 1.087.397
+ms, mientras que la versión C registra los valores centrales más bajos
+(media 1.225.240 ms, mediana 958.894 ms). En términos de variabilidad
+relativa, la versión A presenta el coeficiente de variación más elevado
+($CV = 0{,}69$), lo que indica que su dispersión es proporcionalmente
+mayor que la de B ($CV = 0{,}47$) y C ($CV = 0{,}48$), a pesar de tener
+una media más baja.
+
+```{r p3-graficos}
+# Boxplot comparativo de las tres versiones
+g_box_p3 <- ggboxplot(df_p3,
+                      x       = "version", y = "tiempo",
+                      fill    = "version",
+                      palette = c("steelblue", "darkorange", "forestgreen"),
+                      add     = "jitter",
+                      title   = "P3 – Tiempos de ejecución por versión (≥70 nodos)",
+                      xlab    = "Versión del algoritmo",
+                      ylab    = "Tiempo de ejecución (ms)",
+                      ggtheme = theme_pubr()) +
+  theme(legend.position = "none")
+print(g_box_p3)
+
+# Q-Q plots por versión
+g_qq_p3 <- ggqqplot(df_p3, x = "tiempo", facet.by = "version",
+                    color   = "version",
+                    palette = c("steelblue", "darkorange", "forestgreen"),
+                    title   = "P3 – Gráficos Q-Q por versión",
+                    xlab    = "Cuantiles teóricos normales",
+                    ylab    = "Cuantiles muestrales",
+                    ggtheme = theme_pubr())
+print(g_qq_p3)
+
+# Histogramas por versión
+g_hist_p3 <- gghistogram(df_p3, x = "tiempo", fill = "version",
+                         palette  = c("steelblue", "darkorange", "forestgreen"),
+                         facet.by = "version", bins = 8, add = "mean",
+                         title    = "P3 – Distribución de tiempos por versión",
+                         xlab     = "Tiempo (ms)",
+                         ylab     = "Frecuencia",
+                         ggtheme  = theme_pubr())
+print(g_hist_p3)
+```
+
+Los gráficos confirman y amplían lo observado en los estadísticos
+descriptivos.
+
+-   El **boxplot comparativo** evidencia con claridad que la versión B
+    se ubica en un nivel muy superior al de A y C: su caja comienza
+    aproximadamente donde terminan las cajas de las otras dos versiones,
+    y su bigote superior alcanza valores cercanos a los
+    $4{,}3 \times 10^6$ ms. Las versiones A y C muestran posiciones
+    centrales similares, aunque A presenta una caja más amplia y mayor
+    dispersión hacia los valores altos.
+
+-   Los **gráficos Q-Q** muestran desviaciones sistemáticas respecto de
+    la recta teórica normal en las tres versiones. En todos los casos se
+    observa una curvatura característica de distribuciones con asimetría
+    positiva: los cuantiles muestrales en los extremos superan
+    ampliamente los valores esperados bajo normalidad. La desviación es
+    especialmente pronunciada en las versiones A y B.
+
+-   Los **histogramas** confirman la asimetría positiva en los tres
+    grupos. La versión A concentra 6 de sus 17 observaciones en el
+    intervalo más bajo y luego decrece hacia valores altos. La versión C
+    presenta una distribución similar, con alta concentración en los
+    rangos inferiores. La versión B muestra una distribución más
+    dispersa, sin un pico tan marcado, pero con una cola derecha extensa
+    que llega hasta los $4{,}3 \times 10^6$ ms.
+
+**Formulación de hipótesis:**
+
+$H_0$: La distribución de los tiempos de ejecución es la misma en las
+tres versiones del algoritmo para instancias con 70 o más nodos; las
+tres muestras independientes provienen de poblaciones con idéntica
+distribución. $$H_0: F_A(t) = F_B(t) = F_C(t) \quad \forall\, t$$
+
+$H_A$: Al menos una de las versiones presenta una distribución de
+tiempos de ejecución distinta a las demás para instancias con 70 o más
+nodos.
+$$H_A: F_i(t) \neq F_j(t) \quad \text{para algún par } (i,j) \text{ y algún } t$$
+
+Se fija un nivel de significación $\alpha = 0{,}05$.
+
+**Revisión de condiciones paramétricas:**
+
+La comparación de tres muestras independientes en una variable numérica
+podría abordarse mediante un ANOVA de un factor. Este procedimiento es
+la extensión paramétrica natural para comparar $k \geq 2$ grupos y
+requiere el cumplimiento de tres supuestos: *(1)* variable medida en
+escala de razón o intervalo, *(2)* normalidad de los residuos o de las
+observaciones dentro de cada grupo y *(3)* homogeneidad de varianzas.
+
+```{r p3-condiciones}
+# Condición 3: Normalidad – Shapiro-Wilk por grupo
+sw_A3 <- shapiro.test(muestra_A3)
+sw_B3 <- shapiro.test(muestra_B3)
+sw_C3 <- shapiro.test(muestra_C3)
+cat("Shapiro-Wilk Versión A: W =", round(sw_A3$statistic, 4),
+    " p =", format(sw_A3$p.value, scientific = TRUE, digits = 4), "\n")
+cat("Shapiro-Wilk Versión B: W =", round(sw_B3$statistic, 4),
+    " p =", format(sw_B3$p.value, scientific = TRUE, digits = 4), "\n")
+cat("Shapiro-Wilk Versión C: W =", round(sw_C3$statistic, 4),
+    " p =", format(sw_C3$p.value, scientific = TRUE, digits = 4), "\n")
+
+# Condición 4: Homocedasticidad – Levene
+levene_p3 <- leveneTest(tiempo ~ version, data = df_p3)
+cat("\nPrueba de Levene:\n")
+print(levene_p3)
+```
+
+-   **Escala (condición 1):** Los tiempos de ejecución están medidos en
+    milisegundos, correspondiendo a una variable cuantitativa en
+    escala de razón con cero absoluto. La condición se satisface.
+
+-   **Independencia (condición 2):** Los índices de fila seleccionados
+    para cada versión son independientes entre sí; no existe ningún
+    mecanismo de emparejamiento entre grupos ni entre observaciones
+    dentro del mismo grupo. La condición se satisface.
+
+-   **Normalidad (condición 3):** La prueba de Shapiro–Wilk revela
+    comportamientos distintos según la versión. La versión A obtiene
+    $W = 0{,}878$ y $p = 0{,}030$, por lo que se rechaza la hipótesis
+    de normalidad ($p < \alpha = 0{,}05$). Las versiones B
+    ($W = 0{,}957$, $p = 0{,}705$) y C ($W = 0{,}919$, $p = 0{,}184$) no
+    presentan evidencia suficiente para rechazar la normalidad. Sin
+    embargo, basta con que uno de los grupos viole el supuesto para
+    que el ANOVA de un factor quede invalidado. Además, los tamaños
+    muestrales pequeños ($n_A = 17$, $n_B = 13$, $n_C = 15$) no son
+    suficientes para invocar el Teorema Central del Límite en presencia
+    de la asimetría positiva observada en los histogramas y gráficos
+    Q-Q. La condición no se satisface.
+
+-   **Homocedasticidad (condición 4):** La prueba de Levene produce
+    $F(2,\,42) = 1{,}350$ con $p = 0{,}270$, por lo que no existe
+    evidencia para rechazar la igualdad de varianzas entre los tres
+    grupos. Esta condición se satisface; sin embargo, resulta secundaria
+    dado que la violación del supuesto de normalidad ya descarta el
+    ANOVA.
+
+Las condiciones requeridas para aplicar un ANOVA de un
+factor no se satisfacen adecuadamente, debido al rechazo del supuesto de
+normalidad en la versión A. En consecuencia, se utilizará la prueba de
+Kruskal–Wallis como alternativa no paramétrica válida para la
+comparación de tres muestras independientes.
+
+**Condiciones de la prueba de Kruskal–Wallis:**
+
+La prueba de Kruskal–Wallis es la generalización no paramétrica del
+ANOVA de un factor. Sus condiciones de aplicación son:
+
+1.  **Variable en escala ordinal o superior:** Los tiempos de ejecución
+    en milisegundos cumplen ampliamente este requisito.
+
+2.  **Muestras independientes entre grupos:** Garantizado por el diseño
+    de muestreo aleatorio independiente para cada versión.
+
+3.  **Al menos cinco observaciones por grupo:** Con $n_A = 17$,
+    $n_B = 13$ y $n_C = 15$, esta condición se satisface holgadamente.
+
+Todas las condiciones se cumplen. La prueba puede aplicarse con validez.
+
+**Aplicación de la prueba estadística:**
+
+```{r p3-prueba}
+# Prueba ómnibus: Kruskal-Wallis
+prueba_p3 <- kruskal.test(tiempo ~ version, data = df_p3)
+
+# Prueba de Kruskal-Wallis
+print(prueba_p3)
+cat("\nEstadístico H:", round(prueba_p3$statistic, 4), "\n")
+cat("Grados de libertad:", prueba_p3$parameter, "\n")
+cat("p-valor:", format(prueba_p3$p.value, digits = 6), "\n")
+```
+
+Con $H(2) = 7{,}744$ y $p = 0{,}021 < \alpha = 0{,}05$, la prueba de
+Kruskal–Wallis rechaza la hipótesis nula de igualdad distribucional
+entre los tres grupos. Existe evidencia estadísticamente significativa
+de que al menos una versión presenta una distribución de tiempos de
+ejecución distinta a las demás para instancias con 70 o más nodos. Los
+rangos promedio por versión son: A = 19,82, B = 31,54 y C = 19,20, lo
+que indica que la versión B tiende a ocupar posiciones considerablemente
+más altas en el ordenamiento conjunto de las 45 observaciones. Dado que
+el omnibus es significativo, se procede con el análisis post-hoc para
+identificar qué pares de versiones difieren.
+
+**Análisis post-hoc (prueba de Dunn con corrección de Holm):**
+
+```{r p3-posthoc}
+# Post-hoc de Dunn con corrección de Holm (si KW es significativo)
+
+# Prueba post-hoc de Dunn con corrección de Holm
+posthoc_p3 <- dunn.test(df_p3$tiempo, df_p3$version,
+                        method = "holm", kw = TRUE, label = TRUE,
+                        wrap = FALSE, table = TRUE)
+
+# Rangos promedio por grupo (referencia descriptiva)
+cat("\nRangos promedio por versión:\n")
+rangos_p3 <- rank(df_p3$tiempo)
+rango_medio <- tapply(rangos_p3, df_p3$version, mean)
+print(round(rango_medio, 2))
+```
+
+**Interpretación y conclusión:**
+
+La prueba post-hoc de Dunn con corrección de Holm revela que:
+
+-   **B vs. A** ($z = -2{,}421$, $p_{Holm} = 0{,}016$): diferencia
+    estadísticamente significativa. La versión B presenta rangos
+    sistemáticamente más altos que la versión A, lo que indica tiempos
+    de ejecución mayores.
+
+-   **B vs. C** ($z = 2{,}479$, $p_{Holm} = 0{,}020$): diferencia
+    estadísticamente significativa. La versión B también presenta
+    rangos significativamente más altos que la versión C.
+
+-   **A vs. C** ($z = 0{,}134$, $p_{Holm} = 0{,}447$): diferencia no
+    significativa. No existe evidencia suficiente para concluir que
+    las versiones A y C difieren en su distribución de tiempos de
+    ejecución.
+
+Los rangos promedio consolidan este patrón: C (19,20) $\approx$ A
+(19,82) $\ll$ B (31,54). Las versiones A y C se ubican en posiciones
+similares dentro del ordenamiento conjunto, mientras que la versión B se
+desplaza consistentemente hacia los rangos superiores.
+
+**Conclusión:** Los datos respaldan parcialmente la
+intuición de la memorista. Existe evidencia estadísticamente
+significativa de que la versión B del algoritmo genético produce tiempos
+de ejecución significativamente mayores que las versiones A y C cuando
+las instancias tienen 70 o más nodos ($H(2) = 7{,}744$, $p = 0{,}021$).
+Sin embargo, no se detecta diferencia significativa entre las versiones
+A y C ($p_{Holm} = 0{,}447$), por lo que ambas presentan un rendimiento
+temporal equivalente en este rango de complejidad.
+
+
+## Pregunta 4:
+
+La memorista también sospecha que, al comparar las mismas instancias con
+iguales características, las mejores soluciones encontradas por las
+diferentes versiones del algoritmo tienen rendimientos distintos.
+¿Estará en lo cierto?
+
+Para responder, filtren los datos para tener las
+instancias con 70 o más nodos y seleccionen las columnas con los mejores
+rendimientos registrados. Usando como semilla el valor 71, obtengan una
+muestra aleatoria de 21 instancias. Realicen un análisis estadístico
+pertinente (enunciar hipótesis, revisar condiciones, seleccionar pruebas
+ómnibus y post-hoc según corresponda) para responder la pregunta
+planteada, utilizando pruebas no paramétricas de ser necesario.
+
+**Análisis de la pregunta:**
+
+La memorista sospecha que las tres versiones del algoritmo genético
+producen porcentajes de cercanía a la solución óptima distintos cuando
+se comparan sobre las mismas instancias con 70 o más nodos. Al igual
+que en la Pregunta 2, se especifica que las mismas instancias
+deben evaluarse con las tres versiones. Con tres condiciones y
+medidas repetidas, la prueba ómnibus corresponde a la prueba de
+Friedman, seguida de un análisis post-hoc por pares si el omnibus
+resulta significativo.
+
+**Obtención y manipulación de datos:**
+
+```{r p4-datos}
+# Filtrar instancias con 70 o más nodos
+datos_70_p4 <- datos[datos$n.nodos >= 70, ]
+
+cat("Instancias disponibles con n.nodos >= 70:", nrow(datos_70_p4), "\n")
+cat("Rango de n.nodos en subconjunto:", range(datos_70_p4$n.nodos), "\n")
+
+# Seleccionar columnas de mejor rendimiento de las tres versiones
+pool_p4 <- datos_70_p4[, c("mejor.A", "mejor.B", "mejor.C")]
+
+# Muestra aleatoria de 21 instancias (con sus tres observaciones)
+set.seed(71)
+indices_p4 <- sample(nrow(pool_p4), size = 21)
+muestra_p4 <- pool_p4[indices_p4, ]
+
+# Vectores por versión
+muestra_A4 <- muestra_p4$mejor.A
+muestra_B4 <- muestra_p4$mejor.B
+muestra_C4 <- muestra_p4$mejor.C
+
+# Data frame largo para análisis y visualización
+df_p4_largo <- data.frame(
+  rendimiento = c(muestra_A4, muestra_B4, muestra_C4),
+  version     = factor(rep(c("A", "B", "C"), each = 21)),
+  instancia   = factor(rep(1:21, times = 3))
+)
+
+cat("\nRendimientos versión A (n=21):\n"); print(round(sort(muestra_A4), 4))
+cat("\nRendimientos versión B (n=21):\n"); print(round(sort(muestra_B4), 4))
+cat("\nRendimientos versión C (n=21):\n"); print(round(sort(muestra_C4), 4))
+```
+
+Las 130 instancias con 70 o más nodos conforman el subconjunto de mayor
+complejidad del conjunto de datos. La muestra de 21 instancias
+seleccionadas cubre el rango completo de tamaños disponibles (70–130
+nodos), y para cada una se dispone del porcentaje de cercanía a la
+solución óptima de las tres versiones del algoritmo. A primera vista, la
+versión A concentra sus valores en el tramo superior (entre 94,99 % y
+99,87 %), mientras que la versión B presenta los rendimientos más bajos
+y mayor dispersión (entre 85,99 % y 98,84 %), con varios valores por
+debajo del 93 %. La versión C ocupa una posición intermedia (entre 90,74
+% y 99,44 %). Este patrón inicial sugiere que las tres versiones podrían
+diferir en su distribución de rendimientos, lo que se contrastará
+formalmente mediante la prueba estadística.
+
+**Exploración inicial:**
+
+```{r p4-exploracion}
+# Estadísticos descriptivos por versión
+desc_p4 <- data.frame(
+  Version = c("A", "B", "C"),
+  n       = rep(21, 3),
+  Media   = c(mean(muestra_A4), mean(muestra_B4), mean(muestra_C4)),
+  Mediana = c(median(muestra_A4), median(muestra_B4), median(muestra_C4)),
+  DE      = c(sd(muestra_A4), sd(muestra_B4), sd(muestra_C4)),
+  Min     = c(min(muestra_A4), min(muestra_B4), min(muestra_C4)),
+  Max     = c(max(muestra_A4), max(muestra_B4), max(muestra_C4))
+)
+cat("Estadísticos descriptivos por versión:\n")
+print(desc_p4)
+```
+
+Los estadísticos descriptivos muestran un patrón claro y ordenado entre
+las tres versiones. La versión A presenta el mayor rendimiento promedio
+(97,68 %) y la menor variabilidad ($DE = 1{,}35$ pp), lo que indica
+resultados consistentemente altos en las instancias evaluadas. La
+versión C ocupa la posición intermedia con una media de 96,50 % y una
+desviación estándar de 2,15 pp. La versión B registra el rendimiento más
+bajo (media 94,46 %, mediana 95,10 %) y la mayor dispersión
+($DE = 3{,}40$ pp), con valores que descienden hasta 85,99 %. La
+diferencia entre medianas es de 2,70 pp entre A y B, 0,68 pp entre A y
+C, y 2,02 pp entre C y B. La menor variabilidad de A respecto a B y C
+sugiere que esta versión es además la más estable en términos de calidad
+de solución.
+
+```{r p4-graficos}
+# Boxplot comparativo
+g_box_p4 <- ggboxplot(df_p4_largo,
+                      x       = "version", y = "rendimiento",
+                      fill    = "version",
+                      palette = c("steelblue", "darkorange", "forestgreen"),
+                      add     = "jitter",
+                      title   = "P4 – Mejor rendimiento por versión (≥70 nodos)",
+                      xlab    = "Versión del algoritmo",
+                      ylab    = "Cercanía a solución óptima (%)",
+                      ggtheme = theme_pubr()) +
+  theme(legend.position = "none")
+print(g_box_p4)
+
+# Q-Q plots por versión
+g_qq_p4 <- ggqqplot(df_p4_largo, x = "rendimiento", facet.by = "version",
+                    color   = "version",
+                    palette = c("steelblue", "darkorange", "forestgreen"),
+                    title   = "P4 – Gráficos Q-Q por versión",
+                    xlab    = "Cuantiles teóricos normales",
+                    ylab    = "Cuantiles muestrales",
+                    ggtheme = theme_pubr())
+print(g_qq_p4)
+```
+
+Los gráficos complementan los estadísticos descriptivos y aportan
+información sobre la forma de las distribuciones.
+
+-   El **boxplot comparativo** evidencia con claridad el ordenamiento A
+    $>$ C $>$ B en términos de rendimiento. La caja de la versión A es
+    compacta y se ubica en el tramo superior del eje (entre
+    aproximadamente 97 % y 99 %), mientras que la versión B presenta una
+    caja más amplia desplazada hacia valores bajos, con bigote inferior
+    largo y un valor atípico cercano al 86 %. La versión C muestra una
+    posición intermedia con dispersión moderada y un valor atípico
+    aislado alrededor del 91 %.
+
+-   Los **gráficos Q-Q** permiten evaluar el supuesto de normalidad por
+    versión. La versión A muestra una alineación muy estrecha con la
+    recta teórica en prácticamente toda su extensión, lo que es
+    consistente con una distribución aproximadamente normal. La versión
+    B presenta desviaciones en la cola inferior (puntos por debajo de la
+    recta), indicando la presencia de valores bajos más extremos que los
+    esperados bajo normalidad. La versión C exhibe un comportamiento
+    similar aunque más moderado, con leve desviación en la cola
+    izquierda.
+
+**Formulación de hipótesis:**
+
+$H_0$: La distribución del mejor rendimiento es la misma en las tres
+versiones del algoritmo cuando se comparan las mismas instancias con 70
+o más nodos; los tratamientos no producen efecto sobre la distribución
+de los rendimientos. $$H_0: F_A(t) = F_B(t) = F_C(t) \quad \forall\, t$$
+
+$H_A$: Al menos una versión presenta una distribución de rendimientos
+distinta a las demás cuando se comparan las mismas instancias con 70 o
+más nodos.
+$$H_A: F_i(t) \neq F_j(t) \quad \text{para algún par } (i,j) \text{ y algún } t$$
+
+Se fija un nivel de significación $\alpha = 0{,}05$.
+
+**Revisión de condiciones paramétricas:**
+
+Con tres condiciones relacionadas y medidas repetidas por bloque, la
+alternativa paramétrica sería el ANOVA de medidas repetidas de un
+factor. Este procedimiento requiere que *(1)* la variable esté en escala
+de intervalo o razón, *(2)* las observaciones sean independientes entre
+bloques, *(3)* las distribuciones dentro de cada condición sean
+aproximadamente normales y *(4)* se satisfaga la esfericidad (igualdad
+de varianzas de las diferencias entre pares de condiciones).
+
+```{r p4-condiciones}
+# Condición 3: Normalidad por versión – Shapiro-Wilk
+sw_A4 <- shapiro.test(muestra_A4)
+sw_B4 <- shapiro.test(muestra_B4)
+sw_C4 <- shapiro.test(muestra_C4)
+cat("Shapiro-Wilk Versión A: W =", round(sw_A4$statistic, 4),
+    " p =", format(sw_A4$p.value, scientific = TRUE, digits = 4), "\n")
+cat("Shapiro-Wilk Versión B: W =", round(sw_B4$statistic, 4),
+    " p =", format(sw_B4$p.value, scientific = TRUE, digits = 4), "\n")
+cat("Shapiro-Wilk Versión C: W =", round(sw_C4$statistic, 4),
+    " p =", format(sw_C4$p.value, scientific = TRUE, digits = 4), "\n")
+```
+
+-   **Escala (condición 1):** Los porcentajes de cercanía a la solución
+    óptima están en escala de intervalo, ya que las diferencias
+    entre valores son cuantificables e interpretables. La condición se
+    satisface.
+
+-   **Independencia entre bloques (condición 2):** Las 21 instancias del
+    TSP seleccionadas son independientes entre sí. No existe ninguna
+    relación entre distintas instancias. La condición se satisface.
+
+-   **Normalidad (condición 3):** La prueba de Shapiro–Wilk aplicada a
+    cada versión produce resultados heterogéneos. La versión A no
+    presenta evidencia de no normalidad ($W = 0{,}962$, $p = 0{,}563$).
+    Sin embargo, la versión B obtiene $W = 0{,}899$ y $p = 0{,}033$, y
+    la versión C obtiene $W = 0{,}855$ y $p = 0{,}005$: en ambos casos
+    $p < \alpha = 0{,}05$, por lo que se rechaza la hipótesis de
+    normalidad. El rechazo en dos de los tres grupos invalida el ANOVA
+    de medidas repetidas, independientemente de que A cumpla el
+    supuesto. Lo observado es coherente con las desviaciones en las
+    colas inferiores detectadas en los gráficos Q-Q. La condición no
+    se satisface.
+
+Las condiciones requeridas para el ANOVA de medidas
+repetidas no se satisfacen, debido al rechazo del supuesto de normalidad
+en las versiones B y C. En consecuencia, se utilizará la prueba de
+Friedman como alternativa no paramétrica válida para la comparación de
+tres tratamientos en un diseño de bloques completos aleatorizados.
+
+**Condiciones de la prueba de Friedman:**
+
+1.  **Diseño de bloques completos aleatorizados:** Cada bloque
+    (instancia) contiene exactamente una observación por condición
+    (versión). Con 21 instancias y 3 versiones, la matriz de datos tiene
+    dimensiones $21 \times 3$. La condición se satisface por diseño.
+
+2.  **Variable en escala ordinal o superior:** Los porcentajes de
+    cercanía están en escala de intervalo, que supera el requisito
+    mínimo.
+
+3.  **Independencia entre bloques:** Las instancias del TSP son
+    independientes entre sí; no existe relación entre distintas
+    instancias.
+
+Todas las condiciones se cumplen, por lo que la prueba puede aplicarse con validez.
+
+
+**Aplicación de la prueba estadística:**
+
+```{r p4-prueba}
+# Prueba ómnibus: Friedman
+# Se construye la matriz de datos con filas = bloques, columnas = tratamientos
+matriz_p4 <- as.matrix(muestra_p4)
+
+prueba_p4 <- friedman.test(matriz_p4)
+
+# Prueba de Friedman
+print(prueba_p4)
+cat("\nEstadístico chi-cuadrado:", round(prueba_p4$statistic, 4), "\n")
+cat("Grados de libertad:", prueba_p4$parameter, "\n")
+cat("p-valor:", format(prueba_p4$p.value, digits = 6), "\n")
+
+# Rangos promedio por versión 
+cat("\nRangos promedio por versión (dentro de cada bloque):\n")
+rangos_bloque <- t(apply(matriz_p4, 1, rank))
+rango_medio_p4 <- colMeans(rangos_bloque)
+names(rango_medio_p4) <- c("A", "B", "C")
+print(round(rango_medio_p4, 4))
+```
+
+Con $\chi^2(2) = 22{,}952$ y
+$p = 1{,}04 \times 10^{-5} \ll \alpha = 0{,}05$, la prueba de Friedman
+rechaza la hipótesis nula de igualdad distribucional entre las tres
+versiones. La evidencia es muy sólida: existe una diferencia altamente
+significativa en los rendimientos de las versiones del algoritmo al
+comparar las mismas instancias con 70 o más nodos. Los rangos promedio
+dentro de cada bloque confirman el ordenamiento A (2,714) $>$ C (2,048)
+$>$ B (1,238): la versión A tiende a ocupar el primer lugar en la
+mayoría de los bloques, mientras que la versión B ocupa sistemáticamente
+el último. Dado que el omnibus es significativo, se procede con el
+análisis post-hoc para determinar qué pares de versiones difieren entre
+sí.
+
+**Análisis post-hoc (Wilcoxon por pares con corrección de Holm):**
+
+```{r p4-posthoc, warning=FALSE}
+# Post-hoc: prueba de Wilcoxon de rangos con signo por cada par de versiones,
+# con corrección de Holm para comparaciones múltiples
+posthoc_p4 <- pairwise.wilcox.test(
+  x               = df_p4_largo$rendimiento,
+  g               = df_p4_largo$version,
+  paired          = TRUE,
+  p.adjust.method = "holm"
+)
+print(posthoc_p4)
+
+# Estimadores de Hodges-Lehmann para cada par
+cat("\nEstimadores de Hodges-Lehmann (diferencia de ubicación):\n")
+hl_AB <- wilcox.test(muestra_A4, muestra_B4, paired = TRUE,
+                     conf.int = TRUE, conf.level = 0.95)
+hl_AC <- wilcox.test(muestra_A4, muestra_C4, paired = TRUE,
+                     conf.int = TRUE, conf.level = 0.95)
+hl_BC <- wilcox.test(muestra_B4, muestra_C4, paired = TRUE,
+                     conf.int = TRUE, conf.level = 0.95)
+cat("A vs B: estimador =", round(hl_AB$estimate, 4),
+    "  IC 95%: [", round(hl_AB$conf.int[1], 4), ",",
+    round(hl_AB$conf.int[2], 4), "]\n")
+cat("A vs C: estimador =", round(hl_AC$estimate, 4),
+    "  IC 95%: [", round(hl_AC$conf.int[1], 4), ",",
+    round(hl_AC$conf.int[2], 4), "]\n")
+cat("B vs C: estimador =", round(hl_BC$estimate, 4),
+    "  IC 95%: [", round(hl_BC$conf.int[1], 4), ",",
+    round(hl_BC$conf.int[2], 4), "]\n")
+```
+
+**Interpretación y conclusión:**
+
+La prueba post-hoc de Wilcoxon por pares con corrección de Holm revela
+diferencias significativas en los tres pares de comparación:
+
+-   **A vs. B** ($p_{Holm} = 2{,}9 \times 10^{-6}$): diferencia
+    altamente significativa. El estimador de Hodges–Lehmann indica
+    que la versión A supera a la versión B en $2{,}615$ pp de
+    rendimiento en la misma instancia (IC 95 %: $[1{,}69;\; 4{,}22]$
+    pp). Al no contener el cero, el intervalo confirma que esta
+    diferencia es estadísticamente robusta.
+
+-   **A vs. C** ($p_{Holm} = 0{,}042$): diferencia estadísticamente
+    significativa. La versión A supera a la versión C en $1{,}045$ pp
+    (IC 95 %: $[0{,}02;\; 2{,}27]$ pp). Aunque la diferencia es más
+    moderada y el intervalo apenas excluye el cero, existe evidencia
+    suficiente para concluir que A produce mejores rendimientos que C.
+
+-   **B vs. C** ($p_{Holm} = 0{,}004$): diferencia estadísticamente
+    significativa. El estimador de $-1{,}515$ pp indica que la versión
+    C supera a la versión B (IC 95 %: $[-2{,}71;\; -0{,}88]$ pp). La
+    comparación B–C empleó una aproximación normal en lugar del método
+    exacto debido a la presencia de empates en las diferencias
+    intra-par, lo que no afecta la validez de las conclusiones dado el
+    tamaño del efecto observado.
+
+El ordenamiento completo es A $>$ C $>$ B, con cada par
+significativamente distinto del siguiente.
+
+**Conclusión:** Los datos respaldan la intuición de la
+memorista. Existe evidencia estadísticamente significativa de que las
+tres versiones del algoritmo genético producen rendimientos distintos al
+comparar las mismas instancias con 70 o más nodos
+($\chi^2(2) = 22{,}952$, $p = 1{,}04 \times 10^{-5}$). La versión A es
+la que alcanza sistemáticamente la mayor cercanía a la solución óptima,
+seguida de la versión C y, finalmente, la versión B. La diferencia más
+pronunciada ocurre entre A y B (\~2,6 pp), que en el contexto del TSP
+puede representar una diferencia sustancial en la calidad de las rutas
+encontradas para instancias de alta complejidad.
+

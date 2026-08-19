@@ -1,0 +1,292 @@
+---
+title: 'EP09-respuesta-equipo-9'
+output: html_document
+date: "2026-07-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(dplyr)
+library(leaps)
+library(car)
+library(ggpubr)
+
+```
+
+### 1. Definir la semilla a utilizar
+
+
+```{r}
+set.seed(8078)
+
+```
+
+### 2. Seleccionar una muestra aleatoria
+
+Como la semilla es un numero par obtenemos 100 mujeres 
+
+```{r warning=FALSE, message=FALSE}
+datos = read.csv2("EP09 Datos.csv")
+
+# Selección de 100 observaciones aleatorias con Gender = 0
+muestra_m = datos |> 
+  filter(Gender == 0) |> 
+  slice_sample(n = 100)
+
+# Separar la muestra en 70 observaciones de entrenamiento y 30 de evaluación
+entrenamiento_m = muestra_m |> slice(1:70)
+evaluacion_m = muestra_m |> slice(71:100)
+
+```
+
+### 3. Seleccionar posibles variables predictoras
+
+Seleccionar de forma aleatoria ocho posibles variables predictoras (sin considerar la estatura).
+
+```{r}
+# Se seleccionan 8 variables aleatorias (Weight no se cuenta ya que es la variable de respuesta, y Height se excluye)
+predictores_aleatorios = muestra_m |> select(-Gender, -Weight, -Height) |> names() |> sample(size = 8)
+
+# Se muestran las variables aleatorias resultantes
+predictores_aleatorios
+
+```
+
+### 4. Seleccionar una variable útil para predecir Peso
+
+Seleccionar, de las otras variables, una que el equipo considere que podría ser útil para predecir la variable Peso (sin considerar la estatura), justificando bien esta selección:
+
+Se seleccionó la variable `Hip.Girth`, ya que corresponde a una medida del perímetro de la cadera, una región que concentra una parte importante de la masa corporal. En términos generales, las mujeres tienden a presentar una mayor acumulación de tejido adiposo en esta región, por lo que es esperable que un aumento del peso se acompañe de un incremento en la circunferencia de la cadera. Por ello, se considera que esta variable posee un claro fundamento biológico para contribuir a la predicción del peso.
+
+### 5. Construir un modelo de regresión lineal simple
+
+Usando el entorno R y paquetes estándares, construir un modelo de regresión lineal simple con el predictor seleccionado en el paso anterior.
+
+```{r}
+modelo_rls = lm(Weight ~ Hip.Girth, data = entrenamiento_m)
+summary(modelo_rls)
+
+```
+
+### 6. Buscar entre dos y cinco predictores
+
+Usando herramientas estándares para la exploración de modelos del entorno R, buscar entre dos y cinco predictores de entre las variables seleccionadas al azar en el punto 3, para agregar al modelo de regresión lineal simple obtenido en el paso 5.
+
+```{r}
+formula = as.formula(paste("Weight ~ Hip.Girth +", paste(predictores_aleatorios, collapse = " + ")))
+
+# Como la cantidad de predictores es menor a 10, decidimos utilizar el método de fuerza bruta 
+# para buscar predictores para añadir al modelo existente.
+combinaciones = regsubsets(formula, data = entrenamiento_m, nbest = 1, nvmax = 6, force.in = 1, method = "exhaustive")
+
+plot(combinaciones)
+
+resumen_combinaciones = summary(combinaciones)
+
+# Tamaños totales a considerar (incluye el predictor forzado)
+tamanos = c("3", "4", "5", "6")
+
+# Posiciones reales dentro de los vectores
+posiciones = match(tamanos, rownames(resumen_combinaciones$which))
+
+tabla_comparacion = data.frame(
+  n_predictores = as.numeric(tamanos),
+  BIC = resumen_combinaciones$bic[posiciones],
+  R2_ajustado = resumen_combinaciones$adjr2[posiciones]
+)
+tabla_comparacion
+
+```
+
+**Elección de variables (Parsimonia):**
+Analizando los resultados de la tabla de comparación, se ve que el "mejor" modelo es el que presenta 6 predictores. Sin embargo, al analizar la diferencia entre los valores de BIC y R^2_ajustado entre el modelo de 3 y 6 predictores, esta es muy baja (dif_BIC = -0.3657, dif_R2adj = 0.0067). Teniendo en cuenta el principio de parsimonia, se prefiere mantener simple y elegir el modelo con 3 predictores en total (añadiendo solo 2 a la variable base).
+
+```{r}
+# Obtención de las variables predictoras seleccionadas (Hip.Girth + 2)
+comb_3_predictores = names(which(resumen_combinaciones$which[posiciones[1], -1]))
+
+# Se muestran los predictores seleccionados
+comb_3_predictores
+
+# Concatenación de la fórmula y armado del nuevo modelo
+formula_3_predictores = as.formula(paste("Weight ~ ", paste(comb_3_predictores, collapse = " + ")))
+modelo_rlm = lm(formula_3_predictores, data = entrenamiento_m)
+
+summary(modelo_rlm)
+
+```
+
+### 7. Evaluar la bondad de ajuste y generalidad (condiciones RLM)
+
+Evaluar la bondad de ajuste (incluyendo el análisis de casos atípicos y casos influyentes) y la generalidad (condiciones para RLM) de los modelos y “arreglarlos” en caso de que presenten algún problema.
+
+**Evaluación del modelo RLS (Weight ~ Hip.Girth)**
+
+```{r}
+# Ajustar el modelo de RLS con R
+r2_rls <- summary(modelo_rls)$r.squared
+p_valor_rls <- summary(modelo_rls)$coefficients["Hip.Girth", "Pr(>|t|)"]
+
+etiqueta_rls <- sprintf("R^2 == %.3f", r2_rls)
+etiqueta_p <- ifelse(p_valor_rls < 0.001, "p < 0.001",
+                     sprintf("p == %.3f", p_valor_rls))
+
+# Graficar los datos y el modelo obtenido
+g_rls <- ggscatter(entrenamiento_m, x = "Hip.Girth", y = "Weight",
+                   color = "steelblue", fill = "steelblue1", alpha = 0.5, size = 3,
+                   ylab = "Peso [kg]")
+g_rls <- g_rls + geom_abline(intercept = coef(modelo_rls)[1], slope = coef(modelo_rls)[2],
+                             color = "steelblue4")
+g_rls <- g_rls + xlab(bquote("Circunferencia de cadera" ~ group("[", "cm", "]")))
+
+# Agregar R² y valor p al gráfico
+g_rls <- g_rls + annotate("text", x = -Inf, y = Inf,
+                          label = paste0(etiqueta_rls, "~~", etiqueta_p),
+                          hjust = -0.1, vjust = 1.5, size = 4.5, parse = TRUE)
+
+print(g_rls)
+
+# Gráfico de residuos: para evaluar que no existan patrones sistemáticos
+residualPlots(modelo_rls, type = "rstandard", 
+              id = list(method = "r", n = 3, cex = 0.7, location = "lr"),
+              col = "steelblue4", pch = 20, col.quad = "red")
+
+# Prueba de independencia de los residuos
+durbinWatsonTest(modelo_rls)
+
+# Gráfico marginal: para observar si el modelo captura de forma razonable la relación
+marginalModelPlots(modelo_rls, sd = TRUE,
+                   id = list(method = "r", n = 3, cex = 0.7, location = "lr"),
+                   col = "steelblue", pch = 20, col.line = c("steelblue", "red"))
+
+# Prueba de homocedasticidad
+print(ncvTest(modelo_rls))
+
+# Identificación de casos atípicos/influyentes
+casos_influyentes_rls = influencePlot(modelo_rls, id = list(cex = 0.7))
+casos_influyentes_rls
+
+# Umbral para la distancia de Cook (punto medio de la distribución F con p y n-p grados de libertad)
+umbral_cook_rls = qf(0.5, 2, nrow(entrenamiento_m) - 2)
+umbral_cook_rls
+
+# Se comparan las distancias de Cook obtenidas con el umbral
+casos_influyentes_rls$CookD > umbral_cook_rls
+
+# Reajuste del modelo excluyendo el caso 18, identificado como influyente
+entrenamiento_m_sin_atipico = entrenamiento_m[rownames(entrenamiento_m) != "18", ]
+
+modelo_rls_2 = lm(Weight ~ Hip.Girth, data = entrenamiento_m_sin_atipico)
+summary(modelo_rls_2)
+
+# Se vuelve a aplicar la prueba de homocedasticidad sobre el modelo reajustado, sin el caso 18
+ncvTest(modelo_rls_2)
+
+```
+
+**Conclusiones de las pruebas (RLS):**
+
+* **Ajuste general:** A primera vista el modelo parece ser adecuado. El R-cuadrado indica que el modelo explica en un 84.1% la varianza con respecto al modelo nulo, y el valor p asociado resulta significativo, por lo que hay evidencia suficiente para rechazar la hipótesis nula: el predictor (`Hip.Girth`) parece tener relación con la variable de salida (`Weight`).
+* **Patrones en los residuos:** No se logran visualizar patrones sistemáticos en los residuos, aunque se observan algunos valores atípicos separados considerablemente del conjunto mayor. La prueba correspondiente no resulta significativa.
+* **Independencia:** La prueba de Durbin-Watson no resulta significativa, por lo que no hay evidencia suficiente para descartar que las observaciones son independientes.
+* **Linealidad (gráfico marginal):** La curva de los datos observados y la de las predicciones del modelo se mantienen cercanas a lo largo de casi todo el rango de `Hip.Girth`, lo que sugiere que el modelo captura razonablemente bien la relación. Sin embargo, la dispersión de las observaciones aumenta a medida que crece `Hip.Girth`, anticipando un posible problema de varianza no constante.
+* **Homocedasticidad:** La prueba resulta significativa (X^2(1) = 23.245; p < 0.001), por lo que se rechaza la hipótesis nula de varianza constante. Existe evidencia de que los residuos no cumplen la condición de homocedasticidad, lo que compromete la validez de los errores estándar (aunque no las estimaciones puntuales de los coeficientes). Esto motiva investigar si la violación se debe a uno o más casos atípicos/influyentes.
+* **Casos atípicos/influyentes:** De los cuatro casos marcados por `influencePlot()`, solo el caso 18 supera el umbral de la distancia de Cook (CookD = 1.182 > 0.700) y presenta el residuo estandarizado más extremo (StudRes = 5.90). Esto indica que el caso 18 es efectivamente influyente, mientras que los casos 5, 25 y 53 (con CookD bastante menor al umbral) no representan un problema real pese a haber sido marcados.
+* **Reajuste sin el caso 18:** Al reajustar el modelo excluyendo el caso 18, la prueba de homocedasticidad deja de ser significativa (X^2(1) = 1.485; p = 0.223), por lo que ya no se rechaza el supuesto de varianza constante. Esto confirma que la heterocedasticidad detectada originalmente era generada específicamente por el caso 18. Además, el R^2 del modelo reajustado (0.864) es levemente superior al del original (0.841). Se concluye que el modelo `Weight ~ Hip.Girth` es confiable, y que el caso 18 corresponde a una observación puntual y atípica, y no a una falla general de las condiciones del modelo.
+
+**Evaluación del modelo RLM**
+
+```{r}
+# --- 1. Independencia de los Residuos ---
+durbin_watson = durbinWatsonTest(modelo_rlm)
+print(durbin_watson)
+
+# --- 2. Normalidad de los Residuos ---
+shapiro_test = shapiro.test(residuals(modelo_rlm))
+print(shapiro_test)
+
+# --- 3. Homocedasticidad (Varianza constante) ---
+ncv_test = ncvTest(modelo_rlm)
+print(ncv_test)
+
+# --- 4. Multicolinealidad ---
+vif_valores = vif(modelo_rlm)
+print(vif_valores)
+
+# --- 5. Valores Atípicos e Influyentes y Gráficos de Diagnóstico ---
+# Gráficos de diagnóstico base de R (Q-Q, Residuos vs Ajustados)
+par(mfrow=c(2,2))
+plot(modelo_rlm)
+par(mfrow=c(1,1))
+
+# Gráficos de residuos (paquete car): para evaluar que no existan patrones sistemáticos y observar linealidad
+residualPlots(modelo_rlm, type = "rstandard", 
+              id = list(method = "r", n = 3, cex = 0.7, location = "lr"),
+              col = "steelblue4", pch = 20, col.quad = "red")
+
+# Gráficos marginales (paquete car): para observar si el modelo captura de forma razonable la relación
+marginalModelPlots(modelo_rlm, sd = TRUE,
+                   id = list(method = "r", n = 3, cex = 0.7, location = "lr"),
+                   col = "steelblue", pch = 20, col.line = c("steelblue", "red"))
+
+# Gráfico de influencia (paquete car): para identificar casos atípicos que distorsionen el plano de regresión
+casos_influyentes_rlm = influencePlot(modelo_rlm, id = list(cex = 0.7))
+
+```
+
+Donde podemos decir que cumple con:
+
+* **Independencia:** La prueba de Durbin-Watson no muestra evidencia de autocorrelación.
+* **Normalidad:** La prueba de Shapiro-Wilk confirma normalidad en los residuos, corroborado por el gráfico Q-Q.
+* **Homocedasticidad:** La prueba de Breusch-Pagan confirma varianza constante en los residuos.
+* **Multicolinealidad:** Los valores VIF son menores a 5, sin problemas severos de colinealidad.
+* **Atípicos e Influyentes:** Aunque el gráfico de Distancia de Cook o de Influencia pudiera identificar alguna observación extrema (como el caso 18), no distorsiona gravemente el modelo dado el perfecto cumplimiento de los otros supuestos. Por lo tanto, el modelo resulta robusto y no fue necesario arreglarlo.
+
+### 8. Evaluar el poder predictivo
+
+Evaluar el poder predictivo del modelo con los datos no utilizados para construirlo.
+
+**Evaluación del modelo RLS**
+
+```{r}
+rmse_rls_entrenamiento = sqrt(mean(resid(modelo_rls) ** 2))
+
+predicciones_rls = predict(modelo_rls, evaluacion_m)
+error_rls = evaluacion_m[["Weight"]] - predicciones_rls
+rmse_rls_prueba = sqrt(mean(error_rls ** 2))
+
+cat("Modelo RLS\n")
+cat("RMSE entrenamiento:", rmse_rls_entrenamiento, "\n")
+cat("RMSE prueba:       ", rmse_rls_prueba, "\n")
+
+```
+
+**Conclusiones de las pruebas (RLS):**
+El RMSE obtenido con el conjunto de prueba (3.680) resulta incluso menor al obtenido con el conjunto de entrenamiento (4.411), lo que indica que el modelo no se sobreajustó a los datos con los que fue construido y logra generalizar bien a casos nuevos, manteniendo un error de magnitud similar (o incluso algo menor) al predecir el peso de mujeres que no participaron en su construcción. Esto, sumado a que ya se comprobó que el problema de homocedasticidad se debía a un único caso puntual (18) y no a una falla general del modelo, permite concluir que el modelo de RLS (`Weight ~ Hip.Girth`) tiene un buen poder predictivo.
+
+**Evaluación del modelo RLM**
+
+```{r}
+# Predicciones con el conjunto de evaluación (30 observaciones no vistas)
+predicciones_rls = predict(modelo_rls, newdata = evaluacion_m)
+predicciones_rlm = predict(modelo_rlm, newdata = evaluacion_m)
+
+# Cálculo del RMSE (Error Cuadrático Medio)
+rmse_rls = sqrt(mean((evaluacion_m$Weight - predicciones_rls)^2))
+rmse_rlm = sqrt(mean((evaluacion_m$Weight - predicciones_rlm)^2))
+
+cat("RMSE Modelo RLS (Simple):", rmse_rls, "\n")
+cat("RMSE Modelo RLM (Múltiple):", rmse_rlm, "\n")
+
+# Cálculo del MAE (Error Absoluto Medio)
+mae_rls = mean(abs(evaluacion_m$Weight - predicciones_rls))
+mae_rlm = mean(abs(evaluacion_m$Weight - predicciones_rlm))
+
+cat("MAE Modelo RLS (Simple):", mae_rls, "\n")
+cat("MAE Modelo RLM (Múltiple):", mae_rlm, "\n")
+
+```
+
+**Conclusión del poder predictivo:**
+Al comparar ambos modelos sobre la muestra de prueba, se aprecia que el modelo Múltiple (RLM) no supera en capacidad de generalización al modelo Simple (RLS). El RMSE del modelo simple es menor al del modelo múltiple, indicando que la regresión simple generó menos errores extremos al predecir datos nuevos. Los MAE resultaron virtualmente idénticos. Esta es una comprobación empírica del principio de parsimonia: aumentar predictores mejoró el R-cuadrado en el entrenamiento, pero produjo un ligero sobreajuste frente a datos no vistos. En este caso, el modelo RLS con la variable `Hip.Girth` basta para realizar predicciones confiables y consistentes.

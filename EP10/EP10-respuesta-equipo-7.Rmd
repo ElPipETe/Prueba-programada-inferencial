@@ -1,0 +1,246 @@
+---
+title: "EP10-respuesta-equipo-7"
+date: "2026-08-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(car)
+```
+
+## Trabajo previo
+
+Se comienza cargando los datos, luego se seleccionan sólo las columnas de interés (Peso, estatura y género), creando la variable IMC (Índice de Masa Corporal) a partir de estas y la variable dicotómica EN (Estado Nutricional) que separa a las personas en dos clases: "sobrepeso" si su IMC es igual o mayor a 23,2 indicado con un 1 y "no sobrepeso" en caso contrario indicado con un 0.
+
+```{r}
+datos_originales <- read.csv2("EP09 Datos.csv")
+datos <- datos_originales %>%
+  mutate(
+    IMC = Weight / (Height / 100)^2,
+    EN = if_else(IMC >= 23.2, 1, 0)
+  )
+```
+
+## Construir un modelo de regresión logística para predecir la variable EN
+
+Al ser nosotros grupo 7 se deben elegir 150 hombres al azar donde la mitad tiene EN en "sobrepeso" y la otra en "no sobrepeso", es decir, 75 con valor 1 (sobrepeso) en la columna EN y 75 con valor 0 (no sobrepeso) en la misma, asegurando reproducibilidad mediante la utilización de la semilla 508. Luego, se procede a dividir esta muestra en 2 conjuntos, un conjunto de 100 datos con 50 de los hombres con EN 1 (sobrepeso) elegidos al azar con la misma seed anterior y el resto de la muestra corresponde al otro conjunto que por simple matemática se sabe que corresponden a 50 hombres, donde 25 tienen EN 1 (sobrepeso).
+
+```{r}
+set.seed(508)
+
+datos_hombres <- datos %>%
+  filter(Gender == 1, EN %in% c(0, 1)) %>%
+  group_by(EN) %>%
+  slice_sample(n = 75) %>%
+  ungroup()
+table(datos_hombres$EN)
+
+conjunto_100 <- datos_hombres %>%
+  group_by(EN) %>%
+  slice_sample(n = 50) %>%
+  ungroup()
+table(conjunto_100$EN)
+
+conjunto_50 <- anti_join(datos_hombres, conjunto_100, by = colnames(datos_hombres))
+table(conjunto_50$EN)
+```
+
+Además, recordando que las ocho posibles variables predictoras seleccionadas de forma aleatoria en el ejercicio anterior son: **Biiliac.diameter, Hip.Girth, Wrist.Minimum.Girth, Ankles.diameter, Chest.Girth, Navel.Girth, Shoulder.Girth** y **Chest.diameter**, por lo que como equipo se elige una de las variables restantes que se considera como útil para predecir la clase EN. Al leer sobre las 13 variables restantes (ignorando **peso, altura, IMC, edad** y **género**) se determina que **Waist.Girth** es el más útil para intentar predecir la clase EN, esto respaldado con los siguientes puntos: Este posee una alta correlación con la cantidad de grasa corporal total, otras de las medidas se enfocan más en la estructura ósea del cuerpo que no se relaciona tan directamente al peso como la grasa corporal, de la misma forma otras de las medidas no distinguen entre masa muscular y cantidad de grasa, y, finalmente, la OMS y la NIH utilizan la Waist Girth como medición extra para complementar el cálculo del IMC.
+
+```{r}
+conjunto_100[["EN"]] <- factor(conjunto_100[["EN"]],
+                                levels = c(0, 1),
+                                labels = c("no sobrepeso", "sobrepeso"))
+
+modelo_logit <- glm(EN ~ Waist.Girth,
+                    family = binomial(link = "logit"),
+                    data = conjunto_100)
+
+summary(modelo_logit)
+```
+
+Ahora sigue elegir más predictores para agregar al modelo recién obtenido de entre los 8 escogidos al azar en el ejercicio anterior, siendo los 3 escogidos: **Hip.Girth, Chest.Girth** y **Chest.diameter**.
+
+```{r}
+modelo_extendido <- glm(EN ~ Waist.Girth + Hip.Girth + Chest.Girth + Chest.diameter,
+                        family = binomial(link = "logit"),
+                        data = conjunto_100)
+
+summary(modelo_extendido)
+
+# anova(modelo_logit, modelo_extendido, test = "LRT")
+
+# AIC(modelo_logit, modelo_extendido)
+
+# vif(modelo_extendido)
+```
+
+Procedemos a evaluar la confiabilidad y generalidad de ambos modelos, y arreglarlo(s) de ser necesario. Para esto necesitamos verificar los siguientes puntos:  
+**1) Falta de Multicolinealidad (para el modelo extendido).**  
+**2) Linealidad con el Logit.**  
+**3) Identificación y manejo de casos influyentes o atípicos.**  
+**4) Independencia de las observaciones y tamaño muestral suficiente.**  
+  
+### Falta de multicolinealidad
+```{r}
+vif(modelo_extendido)
+```
+Al ser todos los valores menores a 5 se comprueba la ausencia de multicolinealidad.  
+  
+### Linealidad con el Logit
+```{r}
+conjunto_100 <- conjunto_100 %>%
+  mutate(
+    log_Waist = Waist.Girth * log(Waist.Girth + 1e-5),
+    log_Hip = Hip.Girth * log(Hip.Girth + 1e-5),
+    log_ChestG = Chest.Girth * log(Chest.Girth + 1e-5),
+    log_ChestD = Chest.diameter * log(Chest.diameter + 1e-5)
+  )
+
+test_linealidad <- glm(
+  EN ~ Waist.Girth + log_Waist + 
+       Hip.Girth + log_Hip + 
+       Chest.Girth + log_ChestG + 
+       Chest.diameter + log_ChestD,
+  family = binomial(link = "logit"),
+  data = conjunto_100
+)
+
+summary(test_linealidad)
+```
+Se observan los p-value de los log de cada predictor para saber si requiere transformación o no. Viendo que todos tienen valor p > 0.05 se verifica que todos poseen linealidad con el Logit, esto aplica para ambos modelos.  
+  
+### Evaluación de casos sobreinfluyentes
+```{r}
+# n = 100 tamaño muestral
+######## Modelo extendido ########
+umbral_cook <- 4 / 100
+cooks_dist <- cooks.distance(modelo_extendido)
+casos_influyentes_cook <- which(cooks_dist > umbral_cook)
+
+k <- length(coef(modelo_extendido)) - 1
+umbral_hat <- 2 * (k + 1) / 100
+hat_val <- hatvalues(modelo_extendido)
+casos_alta_influencia <- which(hat_val > umbral_hat)
+
+res_std <- rstandard(modelo_extendido)
+casos_atipicos_res <- which(abs(res_std) > 3)
+
+casos_problematicos <- unique(c(casos_influyentes_cook, casos_alta_influencia, casos_atipicos_res))
+
+######## Modelo inicial ########
+cooks_dist_inicial <- cooks.distance(modelo_logit)
+casos_influyentes_cook_inicial <- which(cooks_dist_inicial > umbral_cook)
+
+k_inicial <- length(coef(modelo_logit)) - 1
+umbral_hat_inicial <- 2 * (k_inicial + 1) / 100
+hat_val_inicial <- hatvalues(modelo_logit)
+casos_alta_influencia_inicial <- which(hat_val_inicial > umbral_hat_inicial)
+
+res_std_inicial <- rstandard(modelo_logit)
+casos_atipicos_res_inicial <- which(abs(res_std_inicial) > 3)
+
+casos_problematicos_inicial <- unique(c(casos_influyentes_cook_inicial, casos_alta_influencia_inicial, casos_atipicos_res_inicial))
+
+cat("Índices de casos potencialmente influyentes/atípicos modelo extendido: ", casos_problematicos, "\n")
+cat("Índices de casos potencialmente influyentes/atípicos modelo inicial: ", casos_problematicos_inicial, "\n")
+```
+  
+Se observa que hay 16 casos sobreinfluyentes para el modelo extendido y 3 para el modelo inicial, que no respentan la distancia de Cook (mayor a 4/100 o a 1) o no respetan apalancamiento o no son residuos estandarizados (fuera del intervalo [-3, 3]). Por lo tanto, se procederá a reajustar los modelos sin casos influyentes y luego comparar coeficientes para evaluar el impacto real de estos casos sobre sus respectivos modelos.  
+  
+```{r}
+######## Modelo extendido ########
+# Subconjunto de datos sin los valores sobreinfluyentes o atípicos
+conjunto_100_depurado_extendido <- conjunto_100[-casos_problematicos, ]
+
+modelo_extendido_depurado <- glm(
+  EN ~ Waist.Girth + Hip.Girth + Chest.Girth + Chest.diameter, 
+  family = binomial(link = "logit"), 
+  data = conjunto_100_depurado_extendido
+)
+
+# Comparación de cieficientes
+table(conjunto_100_depurado_extendido$EN)
+print(cbind(Original = coef(modelo_extendido), Depurado = coef(modelo_extendido_depurado)))
+
+######## Modelo inicial ########
+# Subconjunto de datos sin los valores sobreinfluyentes o atípicos
+conjunto_100_depurado_inicial <- conjunto_100[-casos_problematicos_inicial, ]
+
+modelo_inicial_depurado <- glm(
+  EN ~ Waist.Girth, 
+  family = binomial(link = "logit"), 
+  data = conjunto_100_depurado_inicial
+)
+
+# Comparación de cieficientes
+table(conjunto_100_depurado_inicial$EN)
+print(cbind(Original = coef(modelo_logit), Depurado = coef(modelo_inicial_depurado)))
+```
+De la comparación se desprende que estos datos sobreinfluyentes estaban teniendo un impacto severo en la estimación del modelo extendido y un impacto significativo en la estimación del modelo incicial, su precencia menospreciaba el efecto estimado de las variables Hip.Girth, Chest.Girth y Chest.diameter y sobreestimaba la importancia relativa de la variable Waist.Girth para el modelo extendido, y menospreciaba el verdadero efecto de la variable Waist.Girth en el modelo inicial. Con esto, se modifican ambos modelos para dejar los casos atípicos/influyentes fuera de la muestra de cada modelo pues estaban distorcionando significativamente la confiabilidad y la estabilidad de los parámetros de ambos modelos.
+  
+### Independencia de las observaciones y tamaño muestral suficiente
+Los datos corresponden a una muestra aleatoria de personas seleccionadas de manera independiente, donde la medición anatómica de un sujeto no afecta la de otro.  
+Por otro lado, se revisa que cada modelo tenga un tamaño muestral suficiente: El modelo inicial depurado solo posee un predictor por lo que el EPV = 48/1 >= 10 implica que si se cumple, mientras que para el modelo extendido depurado se tiene que su EPV = 42/4 = 10.5 >= 10 con lo que se concluye que también lo cumple. Ambos modelos tienen eventos por variable suficientes según el estandar de Peduzzi.  
+  
+## Evaluar el poder predictivo de los modelos
+Para evaluar el poder predictivo de cada modelo, estos se aplican el segundo conjunto de datos (50 personas, 25 con EN == 1):
+```{r}
+# Obtener las probabilidades predichas sobre el conjunto de 50 datos
+probs_prueba_ini <- predict(modelo_inicial_depurado, newdata = conjunto_50, type = "response")
+probs_prueba_ext <- predict(modelo_extendido_depurado, newdata = conjunto_50, type = "response")
+
+# Convertir las probabilidades en clasificaciones binarias con umbral 0.5
+preds_ini <- ifelse(probs_prueba_ini >= 0.5, 1, 0)
+preds_ext  <- ifelse(probs_prueba_ext >= 0.5, 1, 0)
+
+# Que la variable sea númerica para los cálculos (0s y 1s)
+real <- as.numeric(as.character(conjunto_50$EN))
+
+# Construir la matriz de confusión
+matriz_ini <- table(Predicho = preds_ini, Real = real)
+matriz_ext  <- table(Predicho_ext = preds_ext, Real = real)
+
+cat("--- Matriz de Confusión: Modelo Inicial ---\n")
+print(matriz_ini)
+
+cat("\n--- Matriz de Confusión: Modelo Extendido ---\n")
+print(matriz_ext)
+
+# Función para calcular Métricas de rendimiento
+calcular_metricas <- function(matriz) {
+  # Extraer componentes de la matriz
+  # TP: Verdaderos Positivos (Predicho = 1, Real = 1)
+  # TN: Verdaderos Negativos (Predicho = 0, Real = 0)
+  # FP: Falsos Positivos     (Predicho = 1, Real = 0)
+  # FN: Falsos Negativos     (Predicho = 0, Real = 1)
+  
+  TP <- ifelse("1" %in% rownames(matriz) & "1" %in% colnames(matriz), matriz["1", "1"], 0)
+  TN <- ifelse("0" %in% rownames(matriz) & "0" %in% colnames(matriz), matriz["0", "0"], 0)
+  FP <- ifelse("1" %in% rownames(matriz) & "0" %in% colnames(matriz), matriz["1", "0"], 0)
+  FN <- ifelse("0" %in% rownames(matriz) & "1" %in% colnames(matriz), matriz["0", "1"], 0)
+  
+  sensibilidad <- TP / (TP + FN)  # Sensibilidad = TP / (Total de Positivos Reales)
+  especificidad <- TN / (TN + FP) # Especificidad = TN / (Total de Negativos Reales)
+  exactitud    <- (TP + TN) / (TP + TN + FP + FN)
+  
+  return(data.frame(
+    Sensibilidad  = round(sensibilidad, 4),
+    Especificidad = round(especificidad, 4),
+    Exactitud     = round(exactitud, 4)
+  ))
+}
+
+# Evaluación y comparación de resultados
+metricas_ini <- calcular_metricas(matriz_ini)
+metricas_ext  <- calcular_metricas(matriz_ext)
+
+resultados <- rbind(Modelo_Inicial = metricas_ini, 
+                    Modelo_Extendido = metricas_ext)
+print(resultados)
+```
+
+## Conlusiones
+En base a los resultados de sensibilidad, especificidad y exactitud obtenidos por ambos modelos se puede concluir que las variables escogidas son muy buen predictor (Waist.Girth, Hip.Girth, Chest.Girth y Chest.diameter) del estado nutricional con 82% de exactitud, junto con un 84% de sensibilidad significa que logran clasificar correctamente al 84% de los hombres que realmente presentan sobrepeso y, por ende, baja cantidad de falsos negativos (sobrepeso no detectado). La especificidad al 80% implica que los modelos clasifican adecuadamente ese porcentaje de personas sin sobrepeso, con baja tasa de falsos positivos.
+Finalmente, viendo que ambos modelos obtuvieron los mismos valores de sensibilidad, especificidad y exactidud implica que agregar las tres variables adicionales al modelo inicial no generó ninguna ganancia en sus predicciones, por lo que bajo el principio de Parsimonia la teoría de modelación estadística exige elegir el modelo más simple, esto pues el modelo simple es mucho más efectivo al solo necesitar una sola medición corporal para realizar su predicción lo que ayuda durante la recolección de datos.

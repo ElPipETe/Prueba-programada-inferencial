@@ -1,0 +1,636 @@
+---
+title: "EP10"
+output: html_document
+date: "2026-08-04"
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Enunciado
+
+Se utilizan los datos de medidas anatómicas recolectados por Heinz et
+al. (2003). El objetivo de este ejercicio es construir y
+evaluar modelos de regresión logística (RLogit) para predecir el
+estado nutricional (variable dicotómica) de una persona a partir de
+sus medidas corporales.
+
+```{r librerias, message=FALSE, warning=FALSE}
+# Paquete para las herramientas de diagnóstico y exploración de
+# modelos de RLogit (vif, residualPlots, influencePlot, marginalModelPlots, etc.)
+if (!require(car)) install.packages("car")
+library(car)
+```
+
+# Preparación de los datos: variables IMC y EN
+
+```{r datos-imc-en}
+# Carga de los datos entregados (separador ";" y decimales con coma)
+datos <- read.csv2("EP09 Datos.csv")
+cat("Dimensiones del conjunto de datos:", dim(datos), "\n")
+
+# IMC = peso (kg) / estatura (m)^2. Height está registrada en cm.
+datos$IMC <- datos$Weight / (datos$Height / 100)^2
+
+# Estado nutricional (EN), dicotómico: sobrepeso si IMC >= 23,2
+datos$EN <- factor(ifelse(datos$IMC >= 23.2, "sobrepeso", "no sobrepeso"),
+                    levels = c("no sobrepeso", "sobrepeso"))
+
+cat("\nResumen de IMC:\n")
+print(summary(datos$IMC))
+cat("\nDistribución de EN en los 507 casos:\n")
+print(table(datos$EN))
+```
+
+Se crea la variable IMC como el cociente entre el peso (en kg) y el
+cuadrado de la estatura (en m, transformada desde los cm registrados
+en Height), y a partir de ella la variable dicotómica EN, que
+clasifica a cada persona como "sobrepeso" (IMC ≥ 23,2) o "no sobrepeso"
+(IMC < 23,2). En el conjunto completo (507 personas) la distribución
+queda razonablemente equilibrada: 256 personas no sobrepeso y 251
+sobrepeso, con un IMC promedio de 23,46 y un rango de 16,88 a 38,19.
+
+# 1. Selección de la muestra y división en entrenamiento y prueba
+
+El número de equipo es 2 (par), por lo que corresponde trabajar con
+una muestra de 150 mujeres (Gender == 0), asegurando que la
+mitad tenga estado nutricional "sobrepeso" y la otra mitad "no
+sobrepeso". Se fija la semilla en 4321 (la misma usada en el ejercicio
+anterior), de modo que el proceso completo de muestreo sea
+reproducible.
+
+```{r p1-muestra}
+seed <- 4321
+
+# Al ser equipo par, se filtran únicamente los casos de género femenino
+mujeres <- datos[datos$Gender == 0, ]
+cat("Casos disponibles de mujeres:", nrow(mujeres), "\n")
+cat("Distribución de EN en mujeres:\n")
+print(table(mujeres$EN))
+
+# Se separan los "pools" de mujeres sobrepeso y no sobrepeso, para
+# muestrear cada grupo por separado y así asegurar el balance 
+pool_sobrepeso    <- mujeres[mujeres$EN == "sobrepeso", ]
+pool_no_sobrepeso <- mujeres[mujeres$EN == "no sobrepeso", ]
+
+# Muestra balanceada de 150 mujeres: 75 con EN "sobrepeso" y 75 con
+# EN "no sobrepeso"
+set.seed(seed)
+muestra_sobrepeso <- pool_sobrepeso[sample(nrow(pool_sobrepeso), 75), ]
+
+set.seed(seed)
+muestra_no_sobrepeso <- pool_no_sobrepeso[sample(nrow(pool_no_sobrepeso), 75), ]
+
+muestra <- rbind(muestra_sobrepeso, muestra_no_sobrepeso)
+cat("\nMuestra total:", nrow(muestra), "\n")
+print(table(muestra$EN))
+
+# División en 100 casos (50 sobrepeso / 50 no sobrepeso) para la
+# construcción de los modelos, y 50 casos (25 / 25) para su
+# evaluación en datos no vistos. Se muestrea cada grupo por separado
+# para preservar el balance exigido en ambos conjuntos.
+set.seed(seed)
+i_entrenamiento_sp <- sample(75, 50)
+entrenamiento_sp <- muestra_sobrepeso[i_entrenamiento_sp, ]
+prueba_sp        <- muestra_sobrepeso[-i_entrenamiento_sp, ]
+
+set.seed(seed)
+i_entrenamiento_nsp <- sample(75, 50)
+entrenamiento_nsp <- muestra_no_sobrepeso[i_entrenamiento_nsp, ]
+prueba_nsp        <- muestra_no_sobrepeso[-i_entrenamiento_nsp, ]
+
+entrenamiento <- rbind(entrenamiento_sp, entrenamiento_nsp)
+prueba        <- rbind(prueba_sp, prueba_nsp)
+
+# Los data frames anteriores quedan ordenados por bloques (primero los
+# casos "sobrepeso", luego los "no sobrepeso"). Ese orden artificial
+# puede generar autocorrelación aparente en diagnósticos que asumen un
+# orden arbitrario de las filas, aunque las observaciones sean
+# independientes entre sí. Por eso se reordenan aleatoriamente las
+# filas de ambos conjuntos, esto no afecta el ajuste de los modelos, solo evita ese artefacto.
+set.seed(seed)
+entrenamiento <- entrenamiento[sample(nrow(entrenamiento)), ]
+set.seed(seed)
+prueba <- prueba[sample(nrow(prueba)), ]
+
+cat("\nCasos de entrenamiento:", nrow(entrenamiento), "\n")
+print(table(entrenamiento$EN))
+cat("\nCasos de prueba       :", nrow(prueba), "\n")
+print(table(prueba$EN))
+```
+
+Se obtuvo una muestra balanceada de 150 mujeres (75 con estado
+nutricional "sobrepeso" y 75 "no sobrepeso") a partir de las 260
+mujeres disponibles en el estudio (80 con sobrepeso, 180 sin
+sobrepeso). Esta muestra se dividió, manteniendo el balance en ambos
+conjuntos, en 100 casos (50 sobrepeso / 50 no sobrepeso) para la
+construcción de los modelos (entrenamiento) y 50 casos (25 sobrepeso /
+25 no sobrepeso) reservados exclusivamente para evaluar su poder
+predictivo más adelante (prueba), sin que estos últimos participen en
+ninguna decisión de ajuste o selección de variables.
+
+# 2. Variables predictoras seleccionadas al azar en el ejercicio anterior
+
+En el ejercicio EP09, usando la misma semilla (4321), se habían
+seleccionado aleatoriamente las siguientes ocho variables candidatas
+a predictoras: Wrist.Minimum.Girth, Age, Shoulder.Girth,
+Hip.Girth, Thigh.Girth, Waist.Girth, Knees.diameter y
+Chest.Girth. Estas ocho variables se reutilizan tal como fueron
+sorteadas entonces (no se vuelven a sortear) y quedan reservadas para
+la exploración de predictores adicionales del paso 5; por lo tanto, no
+se consideran en la selección del predictor único del paso 3.
+
+# 3. Selección de un predictor adicional para el modelo de RLogitS
+
+Del conjunto de variables candidatas se descartan Weight, Height y
+Gender (obviamente correlacionadas con IMC/EN, o constantes al
+trabajar solo con mujeres), IMC y EN (la variable de respuesta y
+su origen directo), y las ocho variables sorteadas en el paso 2, que
+se reservan para el paso 5. 
+
+La variable EN distingue a las mujeres
+con sobrepeso de las que no, según su IMC. Desde el punto de vista
+antropométrico, el sobrepeso corresponde principalmente a un exceso de
+adiposidad, y de todas las medidas corporales, la circunferencia de
+cintura (aquí registrada a la altura del ombligo, Navel.Girth) es la
+que la literatura reconoce de forma más consistente como el mejor
+indicador antropométrico de adiposidad central y de riesgo de
+sobrepeso/obesidad, hasta el punto de que la Organización Mundial de la
+Salud define puntos de corte clínicos propios para ella (≥80 cm riesgo
+aumentado y ≥88 cm riesgo muy aumentado, en mujeres), pensados
+justamente como un indicador complementario (o alternativo) al IMC
+para el mismo propósito de clasificar sobrepeso/obesidad. Por ello se
+propone Navel.Girth como predictor para el modelo de RLogitS.
+
+Para respaldar esta elección con los propios datos, se ajusta un
+modelo de regresión logística univariado con cada una de las 14
+variables candidatas (usando solo el conjunto de entrenamiento) y se
+comparan por AIC y por pseudo-R² de McFadden:
+
+```{r p3-seleccion}
+# Las 8 variables sorteadas en EP09 
+predictores_azar <- c("Wrist.Minimum.Girth", "Age", "Shoulder.Girth", "Hip.Girth",
+                       "Thigh.Girth", "Waist.Girth", "Knees.diameter", "Chest.Girth")
+
+# Variables excluidas de la selección del predictor del paso 3
+excluidas <- c("Weight", "Height", "Gender", "IMC", "EN", predictores_azar)
+candidatas <- setdiff(colnames(entrenamiento), excluidas)
+cat("Variables candidatas disponibles (", length(candidatas), "):\n", sep = "")
+print(candidatas)
+
+# Ajuste univariado de EN ~ variable para cada candidata, y comparación
+# por AIC y pseudo-R2 de McFadden (1 - logLik(modelo)/logLik(modelo nulo))
+modelo_nulo <- glm(EN ~ 1, data = entrenamiento, family = binomial)
+comparacion <- t(sapply(candidatas, function(v) {
+  m <- glm(as.formula(paste("EN ~", v)), data = entrenamiento, family = binomial)
+  c(AIC = AIC(m), pseudoR2 = as.numeric(1 - logLik(m) / logLik(modelo_nulo)))
+}))
+comparacion <- comparacion[order(-comparacion[, "pseudoR2"]), ]
+print(round(comparacion, 4))
+
+# Predictor seleccionado para la RLogitS
+predictor_rlogits <- "Navel.Girth"
+cat("\nPredictor seleccionado para la RLogitS:", predictor_rlogits, "\n")
+```
+
+De las 14 variables candidatas, Bicep.Girth obtiene el mejor ajuste
+univariado (AIC = 66,0; pseudo-R² = 0,55), seguida de cerca por
+Navel.Girth (AIC = 72,3; pseudo-R² = 0,51), que es además la
+variable con mayor correlación punto-biserial con EN de todo el
+conjunto ($r = 0{,}70$). La diferencia de ajuste entre ambas es
+pequeña, y Navel.Girth cuenta con un respaldo conceptual mucho más
+directo y específico para distinguir sobrepeso (la circunferencia de
+cintura como indicador estándar de adiposidad central), mientras que
+Bicep.Girth se usa en la literatura principalmente como indicador
+nutricional en contextos de desnutrición, no de sobrepeso. Por ello se
+mantiene Navel.Girth como predictor para el modelo de RLogitS.
+
+# 4. Modelo de regresión logística simple (RLogitS)
+
+```{r p4-rlogits}
+# Modelo de RLogitS: EN en función de Navel.Girth, ajustado sobre el
+# conjunto de entrenamiento
+modelo_rlogits <- glm(EN ~ Navel.Girth, data = entrenamiento,
+                       family = binomial(link = "logit"))
+print(summary(modelo_rlogits))
+
+cat("\nOdds ratio (OR) e IC 95% para el coeficiente:\n")
+print(exp(cbind(OR = coef(modelo_rlogits), confint(modelo_rlogits))))
+```
+
+El modelo ajustado es:
+
+$$\ln\left(\frac{p(\text{sobrepeso})}{1-p(\text{sobrepeso})}\right) =
+-24,666 + 0,289 \cdot \text{Navel.Girth}$$
+
+El coeficiente de Navel.Girth ($\hat{\beta}_1 = 0,289$, $p =
+5,5\times10^{-7}$) es altamente significativo, ya que, por cada centímetro
+adicional de circunferencia a la altura del ombligo, la chance
+(odds) de estar en la categoría "sobrepeso" se multiplica por
+$OR = 1,335$ (IC 95% $[1,210;\ 1,522]$), es decir, aumenta en
+aproximadamente un 33,5% manteniendo todo lo demás constante. El
+modelo reduce la devianza de 138,63 (modelo nulo, solo intercepto) a
+68,33 con la inclusión de Navel.Girth (AIC = 72,33), lo que sugiere
+que la variable aporta información relevante para distinguir el
+estado nutricional. Cabe notar que el modelo solo debiese emplearse
+dentro del rango de Navel.Girth observado en el entrenamiento (64,2
+a 121,1 cm); no debe usarse para clasificar mujeres con una
+circunferencia abdominal fuera de ese rango. 
+
+# 5. Selección de predictores adicionales para el modelo múltiple
+
+Para explorar qué variables, de las ocho recordadas en el paso 2,
+conviene agregar al modelo de RLogitS del paso 4, se usa step() con
+selección hacia adelante, partiendo del modelo de RLogitS y usando
+como límite superior el modelo que incluye las ocho variables, tanto
+con criterio AIC como con criterio BIC (k = log(n)), para contrastar
+si un criterio más conservador cambia el resultado:
+
+```{r p5-seleccion, warning=FALSE}
+# Nota: se silencian los avisos de "fitted probabilities numerically
+# 0 or 1 occurred" en este chunk porque step() ajusta muchos modelos
+# intermedios durante la búsqueda y los repite decenas de veces; el
+# fenómeno que señalan (separacion cuasi-perfecta) se muestra una sola
+# vez, de forma controlada, y se explica en detalle en la sección de
+# confiabilidad ("Separación (cuasi-)perfecta").
+# Modelo superior: RLogitS + las 8 variables 
+upper_formula <- as.formula(
+  paste("EN ~ Navel.Girth +", paste(predictores_azar, collapse = " + "))
+)
+
+# Selección hacia adelante con AIC
+modelo_forward_aic <- step(modelo_rlogits,
+                            scope = list(lower = ~Navel.Girth, upper = upper_formula),
+                            direction = "forward", trace = 0)
+cat("Predictores agregados con AIC:\n")
+print(setdiff(names(coef(modelo_forward_aic)), c("(Intercept)", "Navel.Girth")))
+
+# Selección hacia adelante con BIC (penaliza más la complejidad)
+n <- nrow(entrenamiento)
+modelo_forward_bic <- step(modelo_rlogits,
+                            scope = list(lower = ~Navel.Girth, upper = upper_formula),
+                            direction = "forward", k = log(n), trace = 0)
+cat("Predictores agregados con BIC:\n")
+print(setdiff(names(coef(modelo_forward_bic)), c("(Intercept)", "Navel.Girth")))
+```
+
+A diferencia de lo observado en EP09 (donde AIC y BIC daban resultados
+distintos), aquí ambos criterios coinciden y agregan las mismas tres
+variables al modelo de RLogitS: Thigh.Girth, Chest.Girth y
+Shoulder.Girth. Durante el ajuste, R emite advertencias
+de "fitted probabilities numerically 0 or 1 occurred", el modelo
+combinado separa casi perfectamente ambas clases en el conjunto de
+entrenamiento, lo que reduce la devianza residual de forma muy marcada
+y explica por qué agregar más variables ya no mejora el AIC/BIC. Esta
+señal de posible separación (cuasi-)perfecta se retoma y evalúa
+formalmente en la sección de confiabilidad, ya que puede afectar la
+estabilidad de las estimaciones de los coeficientes.
+
+# Modelo de regresión logística múltiple (RLogitM)
+
+```{r p5-rlogitm, warning=FALSE}
+# Modelo de RLogitM: EN en función de Navel.Girth + las tres variables
+# seleccionadas en el paso anterior. Se deja warning=FALSE por
+# seguridad (confint() puede advertir al perfilar la verosimilitud
+# cerca de la separación detectada en el paso 5); el fenomeno de fondo
+# se analiza formalmente, con evidencia numerica propia, en la
+# seccion de confiabilidad.
+modelo_rlogitm <- glm(EN ~ Navel.Girth + Thigh.Girth + Chest.Girth + Shoulder.Girth,
+                       data = entrenamiento, family = binomial(link = "logit"))
+print(summary(modelo_rlogitm))
+
+cat("\nOdds ratio (OR) e IC 95% para los coeficientes:\n")
+print(exp(cbind(OR = coef(modelo_rlogitm), suppressWarnings(confint(modelo_rlogitm)))))
+```
+
+El modelo de RLogitM queda:
+
+$$\ln\left(\frac{p(\text{sobrepeso})}{1-p(\text{sobrepeso})}\right) =
+-131,425 + 0,050\cdot\text{Navel.Girth} + 1,064\cdot\text{Thigh.Girth} +
+1,263\cdot\text{Chest.Girth} - 0,448\cdot\text{Shoulder.Girth}$$
+
+La devianza baja de 138,63 (modelo nulo) a 21,81 con las cuatro
+variables (AIC = 31,81), una mejora sustancial respecto a los 68,33 de
+devianza residual del RLogitS (AIC = 72,33). Thigh.Girth
+($p = 0,011$) y Chest.Girth ($p = 0,003$) tienen coeficientes
+positivos y significativos, es decir, mayor circunferencia de muslo o de pecho
+se asocia a mayor chance de sobrepeso. Shoulder.Girth tiene un
+coeficiente negativo y significativo ($p = 0,015$), lo que a primera
+vista es contraintuitivo, pero esto se debe a un patrón de multicolinealidad
+entre variables de grosor corporal fuertemente correlacionadas, una
+vez que Chest.Girth y Thigh.Girth ya capturan la adiposidad
+general, el término de Shoulder.Girth puede quedar "compensando" en
+dirección contraria dentro del modelo conjunto. Navel.Girth, que era
+altamente significativa en el RLogitS, deja de serlo en el RLogitM
+($p = 0,638$), un hallazgo análogo al observado con esta misma
+variable en el modelo de RLM de EP09: su información sobre adiposidad
+queda mayormente absorbida por las otras variables de grosor corporal
+del modelo múltiple. Estos indicios de multicolinealidad, junto con la
+señal de separación (cuasi-)perfecta detectada en el paso 5, se
+examinan formalmente a continuación.
+
+# 6. Confiabilidad y generalidad de los modelos
+
+## Confiabilidad
+
+**Linealidad con el logit:**
+
+```{r p6-linealidad, warning=FALSE}
+# RLogitS: test de Box-Tidwell (condicion de linealidad con el logit)
+boxTidwell(as.numeric(entrenamiento$EN) - 1 ~ Navel.Girth,
+           data = data.frame(Navel.Girth = entrenamiento$Navel.Girth))
+
+# RLogitM: test de curvatura de Tukey por predictor, via residualPlots
+residualPlots(modelo_rlogitm, id = FALSE)
+```
+
+En el RLogitS, el test de Box-Tidwell no resulta significativo
+($t = -1,75$, $p = 0,082$), por lo que no hay evidencia suficiente de
+que la relación entre Navel.Girth y el logit de EN se aleje de la
+linealidad; la condición se satisface, aunque el valor p, cercano a
+0,05, amerita cierta cautela. En el RLogitM, ninguno de los cuatro
+test de curvatura de Tukey por predictor resulta significativo
+($p = 0,618$; $0,728$; $0,954$; $0,357$, respectivamente), por lo que
+la condición de linealidad con el logit se satisface con más holgura
+para las cuatro variables del modelo múltiple.
+
+**Independencia de los residuos:**
+
+```{r p6-independencia}
+# Prueba de Durbin-Watson sobre ambos modelos (con las filas
+# reordenadas aleatoriamente, para no arrastrar el orden
+# por bloques EN con el que se armó la muestra). El p-valor de esta
+# prueba se estima por bootstrap (1000 remuestreos) 
+set.seed(seed)
+durbinWatsonTest(modelo_rlogits)
+set.seed(seed)
+durbinWatsonTest(modelo_rlogitm)
+```
+
+Ninguna de las dos pruebas de Durbin-Watson resulta significativa
+($p = 0,912$ para RLogitS; $p = 0,946$ para RLogitM), consistente con
+que cada fila corresponde a una mujer distinta, seleccionada de forma
+aleatoria e independiente de las demás (paso 1). La condición de
+independencia se satisface tanto por el diseño de muestreo como por
+esta verificación empírica.
+
+**Multicolinealidad (solo RLogitM):**
+
+```{r p6-vif}
+vif(modelo_rlogitm)
+```
+
+Los VIF van de 1,45 (Navel.Girth) a 4,02 (Chest.Girth), todos por
+debajo del umbral de 5 habitualmente usado como señal de
+multicolinealidad moderada, y muy por debajo de 10 (severa). Sin
+embargo, las correlaciones entre los cuatro predictores en el
+entrenamiento son considerables (Chest.Girth-Shoulder.Girth
+$r=0,864$; Navel.Girth-Chest.Girth $r=0,839$;
+Navel.Girth-Thigh.Girth $r=0,736$), lo que explica, más que una
+multicolinealidad severa detectada por el VIF, la pérdida de
+significancia de Navel.Girth en el modelo conjunto, esto debido a que su aporte queda
+distribuido entre las otras tres variables de grosor corporal, todas
+ellas correlacionadas entre sí y con la adiposidad general.
+
+**Bondad de ajuste:**
+
+```{r p6-ajuste}
+modelo_nulo <- glm(EN ~ 1, data = entrenamiento, family = binomial)
+cat("RLogitS vs. modelo nulo:\n")
+print(anova(modelo_nulo, modelo_rlogits, test = "Chisq"))
+cat("\nRLogitM vs. modelo nulo:\n")
+print(anova(modelo_nulo, modelo_rlogitm, test = "Chisq"))
+cat("\nRLogitM vs. RLogitS (modelos anidados):\n")
+print(anova(modelo_rlogits, modelo_rlogitm, test = "Chisq"))
+```
+
+Ambos modelos reducen la devianza de forma altamente significativa
+respecto al modelo nulo ($p < 2,2\times10^{-16}$ en los dos casos), lo
+que confirma que sus predictores aportan información real sobre EN.
+Además, el RLogitM reduce significativamente la devianza respecto al
+RLogitS ($\chi^2(3) = 46,52$, $p = 4,4\times10^{-10}$), agregar
+Thigh.Girth, Chest.Girth y Shoulder.Girth mejora el ajuste de
+forma clara.
+
+**Casos atípicos e influyentes:**
+
+```{r p6-atipicos}
+outlierTest(modelo_rlogits)
+outlierTest(modelo_rlogitm)
+influencePlot(modelo_rlogits, id = FALSE)
+influencePlot(modelo_rlogitm, id = FALSE)
+```
+
+En ninguno de los dos modelos outlierTest() señala casos atípicos
+significativos tras la corrección de Bonferroni (RLogitS:
+$t = 2,67$, $p_{\text{Bonferroni}} = 0,75$; RLogitM: $t = -2,98$,
+$p_{\text{Bonferroni}} = 0,29$). En cuanto a la influencia, la
+distancia de Cook máxima es 0,235 en el RLogitS y 0,470 en el RLogitM,
+ambas muy por debajo del umbral de alerta ($D>1$), ningún caso
+individual es lo bastante influyente como para distorsionar el ajuste
+por sí solo. Sí se observa que, en el RLogitM, 20 de los 100 casos de
+entrenamiento superan el umbral habitual de apalancamiento alto
+($2p/n$), muy por encima de los aproximadamente 8 esperables bajo un
+ajuste "típico"; esto es consistente con el fenómeno que se examina a
+continuación.
+
+**Separación (cuasi-)perfecta:**
+
+```{r p6-separacion}
+# Numero de casos con probabilidad ajustada extrema
+probs_rlogitm <- fitted(modelo_rlogitm)
+cat("Casos con probabilidad < 0,001 o > 0,999:",
+    sum(probs_rlogitm < 0.001 | probs_rlogitm > 0.999), "de", length(probs_rlogitm), "\n")
+
+# Matriz de clasificacion en el propio entrenamiento (umbral 0,5)
+cat("\nClasificacion en entrenamiento (umbral 0,5):\n")
+print(table(Real = entrenamiento$EN,
+            Predicho = ifelse(probs_rlogitm >= 0.5, "sobrepeso", "no sobrepeso")))
+
+# Se prueba remover Shoulder.Girth (coeficiente de signo
+# contraintuitivo y la variable mas correlacionada con Chest.Girth)
+# para ver si el problema se debe a ella
+modelo_rlogitm_reducido <- glm(EN ~ Navel.Girth + Thigh.Girth + Chest.Girth,
+                                data = entrenamiento, family = binomial)
+probs_red <- fitted(modelo_rlogitm_reducido)
+cat("\nSin Shoulder.Girth -- casos con probabilidad extrema:",
+    sum(probs_red < 0.001 | probs_red > 0.999), "de 100\n")
+cat("AIC con Shoulder.Girth:", round(AIC(modelo_rlogitm), 2),
+    " | AIC sin Shoulder.Girth:", round(AIC(modelo_rlogitm_reducido), 2), "\n")
+print(anova(modelo_rlogitm_reducido, modelo_rlogitm, test = "Chisq"))
+```
+
+Durante la búsqueda de predictores con step() (paso 5), R advirtió
+repetidamente "fitted probabilities numerically 0 or 1 occurred" al
+explorar los modelos intermedios (aviso que se silenció en ese chunk
+para no repetirlo decenas de veces, remitiendo la explicación a esta
+sección). Esa advertencia es la señal de un problema real, que se
+confirma directamente sobre el RLogitM ya ajustado: 62 de los 100
+casos de entrenamiento quedan con una probabilidad estimada menor a
+0,001 o mayor a 0,999, y el modelo clasifica correctamente 96 de los
+100 casos de entrenamiento (solo 2 falsos positivos y 2 falsos
+negativos). Esto es evidencia de separación (cuasi-)perfecta, es decir, las
+variables de grosor corporal, en conjunto, discriminan casi sin error
+el estado nutricional dentro de la propia muestra de entrenamiento.
+Se investigó si Shoulder.Girth (la variable de signo contraintuitivo y más correlacionada con
+Chest.Girth) era la causante, ajustando el modelo sin ella, sin embargo, el
+problema persiste casi igual (49 de 100 casos con probabilidad
+extrema), su AIC empeora (38,88 frente a 31,81) y la prueba de razón de
+verosimilitudes confirma que Shoulder.Girth aporta significativamente
+al ajuste ($\chi^2(1) = 9,07$, $p = 0,0026$). Es decir, la separación
+no se debe a una variable puntual que se pueda simplemente eliminar,
+sino a que el conjunto de variables de grosor corporal es, en sí
+mismo, muy discriminante para una variable como EN, que fue definida
+mediante un umbral sobre el IMC (una combinación de peso y estatura
+estrechamente relacionada con estas mismas medidas corporales). Como
+ningún caso individual resulta sobreinfluyente (distancias de Cook muy
+por debajo de 1 en ambos modelos) y los coeficientes y errores
+estándar del RLogitM no muestran los valores extremos característicos
+de una separación completa "patológica", se opta por mantener el
+modelo RLogitM tal como fue seleccionado en el paso 5, sin usar
+herramientas para "corregir" la separación, documentando en cambio el riesgo asociado:
+un ajuste tan bueno en entrenamiento puede no generalizar igual de bien
+a datos nuevos. Este riesgo se contrasta empíricamente en la sección de
+generalidad y, sobre todo, en la evaluación del poder predictivo con
+los datos de prueba (paso 7).
+
+## Generalidad
+
+```{r p6-generalidad}
+# Al menos 10 a 15 observaciones por predictor
+cat("RLogitS: ", nrow(entrenamiento), "observaciones /", 1, "predictor =",
+    nrow(entrenamiento) / 1, "obs. por predictor\n")
+cat("RLogitM: ", nrow(entrenamiento), "observaciones /", 4, "predictores =",
+    nrow(entrenamiento) / 4, "obs. por predictor\n")
+```
+
+En cuanto al tamaño muestral, el RLogitS cuenta con 100 observaciones
+para 1 predictor y el RLogitM con 100 observaciones para 4 predictores
+(25 por predictor); ambos superan ampliamente la recomendación
+habitual de 10 a 15 observaciones por predictor, por lo que el tamaño
+de la muestra de entrenamiento no compromete la generalidad de
+ninguno de los dos modelos. La independencia de las observaciones
+(mujeres seleccionadas al azar, sin agrupamiento ni orden temporal) y
+la ausencia de casos sobreinfluyentes (sección anterior) también
+juegan a favor de la generalidad. El principal riesgo identificado es
+el ya señalado en la sección de confiabilidad, la separación
+(cuasi-)perfecta del RLogitM podría ser síntoma de un ajuste demasiado
+específico a la muestra de entrenamiento (sobreajuste), lo que
+reduciría su capacidad de generalizar a mujeres no incluidas en dicha
+muestra.  Se documenta este riesgo en lugar de "corregirlo" artificialmente, y se verifica
+directamente si se materializa comparando el desempeño de ambos
+modelos en entrenamiento y en los 50 casos de prueba no usados para su
+construcción, en la siguiente sección.
+
+# 7. Poder predictivo: sensibilidad y especificidad
+
+Para evaluar el poder predictivo se construye, para cada modelo, la
+matriz de confusión (umbral 0,5) tanto en el conjunto de entrenamiento
+como en los 50 casos de prueba (25 sobrepeso / 25 no sobrepeso) no
+usados para construir los modelos, y se calculan exactitud,
+sensibilidad y especificidad. Si el desempeño en prueba cae de forma
+notoria respecto al de entrenamiento, sería evidencia de sobreajuste,
+el riesgo señalado en la sección de generalidad para el RLogitM.
+
+```{r p7-funcion}
+# Funcion auxiliar: matriz de confusion y metricas (umbral 0,5) para
+# un modelo y un conjunto de datos 
+evaluar_modelo <- function(modelo, datos_eval, nombre) {
+  probs <- predict(modelo, newdata = datos_eval, type = "response")
+  pred  <- factor(ifelse(probs >= 0.5, "sobrepeso", "no sobrepeso"),
+                   levels = c("no sobrepeso", "sobrepeso"))
+  mc <- table(Real = datos_eval$EN, Predicho = pred)
+
+  VP <- mc["sobrepeso", "sobrepeso"];       VN <- mc["no sobrepeso", "no sobrepeso"]
+  FP <- mc["no sobrepeso", "sobrepeso"];    FN <- mc["sobrepeso", "no sobrepeso"]
+
+  exactitud      <- (VP + VN) / sum(mc)
+  sensibilidad   <- VP / (VP + FN)
+  especificidad  <- VN / (VN + FP)
+
+  cat("--", nombre, "--\n")
+  print(mc)
+  cat("Exactitud:", round(exactitud, 3),
+      " Sensibilidad:", round(sensibilidad, 3),
+      " Especificidad:", round(especificidad, 3), "\n\n")
+  invisible(c(exactitud = exactitud, sensibilidad = sensibilidad, especificidad = especificidad))
+}
+```
+
+```{r p7-rlogits}
+cat("=== RLogitS (EN ~ Navel.Girth) ===\n")
+metricas_rlogits_entrenamiento <- evaluar_modelo(modelo_rlogits, entrenamiento, "RLogitS - entrenamiento")
+metricas_rlogits_prueba        <- evaluar_modelo(modelo_rlogits, prueba, "RLogitS - prueba")
+```
+
+En el RLogitS, el desempeño en prueba (exactitud 0,90; sensibilidad
+0,88; especificidad 0,92) es incluso levemente mejor que en
+entrenamiento (exactitud 0,87; sensibilidad 0,86; especificidad
+0,88). Esto no indica sobreajuste, con solo 50 casos de prueba,
+pequeñas variaciones muestrales pueden favorecer al conjunto de prueba,
+y confirma que un modelo con un solo predictor, lejos de la separación
+observada en el RLogitM, generaliza de forma estable.
+
+```{r p7-rlogitm}
+cat("=== RLogitM (EN ~ Navel.Girth + Thigh.Girth + Chest.Girth + Shoulder.Girth) ===\n")
+metricas_rlogitm_entrenamiento <- evaluar_modelo(modelo_rlogitm, entrenamiento, "RLogitM - entrenamiento")
+metricas_rlogitm_prueba        <- evaluar_modelo(modelo_rlogitm, prueba, "RLogitM - prueba")
+```
+
+En el RLogitM, el desempeño en entrenamiento es prácticamente perfecto
+(exactitud 0,96; sensibilidad 0,96; especificidad 0,96; solo 2 falsos
+positivos y 2 falsos negativos de 100), consistente con la separación
+(cuasi-)perfecta detectada antes. En prueba, el desempeño baja algo
+(exactitud 0,92; sensibilidad 0,92; especificidad 0,92), pero la caída
+es de apenas 4 puntos porcentuales, no una caída drástica, el modelo
+sigue clasificando correctamente 46 de los 50 casos de prueba. Esto
+confirma que el riesgo de sobreajuste señalado en la sección de
+generalidad, si bien real, no se materializa de forma severa, el
+RLogitM generaliza razonablemente bien a datos no usados en su
+construcción, y su desempeño en prueba (92%) sigue siendo mejor que el
+del RLogitS (90%), tanto en exactitud como en sensibilidad y
+especificidad.
+
+# Conclusión
+
+El proceso completo, desde la creación de las variables IMC y EN
+hasta la validación con datos no vistos, permite construir dos modelos
+de regresión logística confiables para predecir el estado nutricional
+(sobrepeso o no) de una mujer a partir de sus medidas corporales. El
+modelo RLogitS (EN ~ Navel.Girth), basado en la circunferencia de
+cintura como indicador estándar de adiposidad central, cumple sin
+mayores reparos las condiciones de linealidad, independencia y ausencia
+de casos influyentes, y logra un desempeño sólido y estable tanto en
+entrenamiento como en prueba (exactitud entre 0,87 y 0,90).
+
+El proceso de búsqueda de predictores adicionales, usando step()
+sobre las ocho variables sorteadas en el ejercicio anterior, coincidió
+bajo criterio AIC y BIC en agregar Thigh.Girth, Chest.Girth y
+Shoulder.Girth. El modelo RLogitM resultante mejora significativamente el ajuste respecto
+al RLogitS ($\chi^2(3) = 46{,}52$, $p = 4,4\times10^{-10}$) y cumple
+adecuadamente las condiciones de linealidad con el logit,
+independencia y ausencia de multicolinealidad severa (VIF máximo de
+4,02), aunque muestra una señal clara de separación (cuasi-)perfecta
+entre clases en el conjunto de entrenamiento, se investigó si esta
+separación se debía a una variable puntual (Shoulder.Girth, la de
+signo menos intuitivo) y se determinó que no, el problema persiste al
+quitarla y su aporte al modelo es significativo, por lo que se decidió
+mantener el modelo completo, documentando el riesgo de sobreajuste en
+lugar de "corregirlo" artificialmente.
+
+La evaluación con los 50 casos de prueba confirma que ese riesgo no se
+materializó de forma severa, el RLogitM mantiene una exactitud de 0,92
+en prueba (frente a 0,96 en entrenamiento), superando en las tres
+métricas (exactitud, sensibilidad y especificidad) al RLogitS
+(0,90 en prueba). En consecuencia, el modelo RLogitM
+EN ~ Navel.Girth + Thigh.Girth + Chest.Girth + Shoulder.Girth es el
+más recomendable de los dos para predecir el estado nutricional de
+mujeres a partir de estas medidas corporales, siempre teniendo presente
+que su ajuste muy alto en entrenamiento amerita seguir monitoreando su
+desempeño si se aplicara a nuevas muestras, y que ambos modelos solo
+son válidos dentro de los rangos de las variables observados en esta
+muestra de mujeres.

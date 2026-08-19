@@ -1,0 +1,314 @@
+---
+title: "Actividad 8"
+author: "Grupo 10"
+date: "2026-07-11"
+output: html_document
+---
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+if(!require(dplyr)) install.packages("dplyr") #Para filtrar/leer excel
+if(!require(tidyr)) install.packages("tidyr")
+if(!require(ggplot2)) install.packages("ggplot2") #Para graficar
+if(!require(ggpubr)) install.packages("ggpubr")
+if(!require(DT)) install.packages("DT")
+if(!require(kableExtra)) install.packages("kableExtra") #Para crear la tabla
+if(!require(pwr)) install.packages("pwr")
+if(!require(tidyverse)) install.packages("tidyverse")
+if(!require(rcompanion)) install.packages("rcompanion")
+if(!require(RVAideMemoire)) install.packages("RVAideMemoire")
+if(!require(ez)) install.packages("ez")
+if(!require(nlme)) install.packages("nlme")
+if(!require(emmeans)) install.packages("emmeans")
+if(!require(pROC)) install.packages("pROC")
+if(!require(caret)) install.packages("caret")
+if(!require(leaps)) install.packages("leaps")
+if(!require(car)) install.packages("car")
+if(!require(plotly)) install.packages("plotly")
+if(!require(BSDA)) install.packages("BSDA")
+if(!require(TeachingDemos)) install.packages("TeachingDemos")
+if(!require(DescTools)) install.packages("DescTools")
+if(!require(rsample)) install.packages("rsample")
+```
+
+---
+
+## Contexto
+
+Como habíamos visto a comienzos del semestre, la Encuesta de Caracterización Socioeconómica Nacional (Casen) es realizada por el Ministerio de Desarrollo Social de forma periódica para conocer la situación de los hogares chilenos con relación a aspectos demográficos, de educación, salud, vivienda, trabajo e ingresos. Es la principal fuente de información para estimar la magnitud de la pobreza y la distribución del ingreso en el país.
+
+Se tiene a disposición un archivo CSV con un subconjunto de los datos obtenidos en la Casen 2017. El equipo debe revisar las columnas disponibles en este archivo según la descripción en el libro de códigos de la encuesta, que también queda disponible para este ejercicio. Es importante notar que en esta encuesta hay datos de carácter colectivo sobre “el hogar” del entrevistado, pero también hay datos de carácter individual, que se refieren “al jefe o la jefa de hogar” (no al entrevistado).
+
+---
+
+## Preguntas
+
+1. Propongan una pregunta de investigación original, que involucre la comparación de la frecuencia en que se observa un evento o característica en dos grupos independientes (más abajo se dan unos ejemplos). Fijando una semilla propia, seleccionen una muestra aleatoria de hogares (100 < n < 150) y respondan la pregunta propuesta utilizando una prueba de permutaciones Monte Carlo. Deben reportar un intervalo de confianza para el estadístico utilizado usando las mismas remuestras.
+
+
+La pregunta propuesta es la siguiente:
+
+¿Existe una diferencia en la proporción de personas de la Región Metropolitana que vivieron la mayor parte del tiempo con ambos padres (r11) entre hombres y mujeres (sexo)?
+
+Sean $P_h$ y $P_m$ las proporciones de hombres y mujeres respectivamente, de la Región Metropolitana que vivieron la mayor parte del tiempo con ambos padres. Entonces:
+
+$H_0$: No hay diferencias significativas en la proporción de hombres y mujeres de la región metropolitana que vivieron la mayor parte del tiempo con ambos padres. Matemáticamente hablando: $P_h - P_m = 0$
+
+$H_A$: Existen diferencias significativas en la proporción de hombres y mujeres de la región metropolitana que vivieron la mayor parte del tiempo con ambos padres. Matemáticamente hablando: $P_h - P_m \neq 0$
+
+Se usará un nivel de significación $\alpha = 0.05$.
+
+```{r}
+# Se leen los datos
+datos = read.csv2("EP08 Datos CASEN 2017.csv", stringsAsFactors = TRUE, header = TRUE, sep = ",")
+
+# Se filtran solo las personas de la Región Metropolitana que sí responden
+datos_rm <- datos |> filter(region == "Región Metropolitana de Santiago", !is.na(r11))
+
+# Se crea una variable que indique si vivió con ambos padres
+datos_rm <- datos_rm |> mutate(ambos_padres = if_else(r11 == "Ambos padres", "Sí", "No"))
+
+# Se seleccionan las variables a utilizar
+datos_rm <- datos_rm |> select(sexo, ambos_padres)
+
+# Nivel de significación
+alfa <- 0.05
+```
+
+```{r}
+# Se fija la semilla y se selecciona la muestra aleatoria (100 < n < 150)
+set.seed(2026)
+
+muestra <- datos_rm |> slice_sample(n = 120)
+
+# Función que calcula la diferencia de proporciones (hombre - mujer)
+# para una remuestra generada con permutations()
+dif_dos_proporciones <- function(remuestra, ...) {
+  analysis(remuestra) |>
+    group_by(sexo) |>
+    summarise(p = mean(ambos_padres == "Sí")) |>
+    summarise(estimate = p[sexo == "Hombre"] - p[sexo == "Mujer"]) |>
+    pull(estimate)
+}
+
+# Se generan las permutaciones 
+# incluyendo la muestra original
+R <- 4999
+set.seed(2027)
+remuestras <- permutations(muestra, permute = sexo, times = R, apparent = TRUE)
+
+# Se obtiene la distribución permutada de la diferencia de proporciones
+dist_perm <- remuestras |>
+  mutate(dif_p = map(splits, dif_dos_proporciones)) |>
+  unnest(dif_p)
+```
+
+```{r}
+# Se obtiene la diferencia observada en la muestra original
+dif_obs <- dist_perm |> filter(id == "Apparent") |> pull(dif_p)
+
+# Se calcula el valor p de la prueba de permutaciones
+n_extremos <- dist_perm |>
+  filter(abs(dif_p) >= abs(dif_obs)) |>
+  summarise(n = n())
+
+# Se considera también la muestra original (Apparent)
+p_valor <- n_extremos / (R + 1)
+
+cat("Diferencia observada (Hombre - Mujer):", round(dif_obs, 4), "\n")
+cat("Valor p:", round(p_valor$n, 4), "\n")
+```
+
+```{r}
+# Intervalo de confianza aproximado construido a partir de la
+# distribución de permutaciones recentrada en el estadístico observado.
+desplazamiento <- dif_obs - mean(dist_perm$dif_p)
+dist_perm_recentrada <- dist_perm$dif_p + desplazamiento
+
+IC <- quantile(dist_perm_recentrada, probs = c(0.025, 0.975))
+
+cat("Intervalo de confianza 95% (aproximado, recentrado):\n")
+print(round(IC, 4))
+```
+
+```{r}
+# Gráfico de la distribución permutada y la situación del contraste
+titulo <- sprintf("Contraste de hipótesis usando %d permutaciones", R)
+
+dist_perm |>
+  filter(id != "Apparent") |>
+  mutate(extremo = factor(if_else(abs(dif_p) >= abs(dif_obs), 1, 0))) |>
+  ggplot(aes(x = dif_p)) +
+  geom_histogram(aes(alpha = extremo), boundary = 0,
+                 bins = 30, color = "steelblue4", fill = "steelblue") +
+  labs(title = titulo, x = "Diferencia de proporciones (Hombre - Mujer)",
+       y = "Frecuencia") +
+  geom_vline(xintercept = c(-dif_obs, dif_obs), colour = "steelblue4",
+             linetype = "dashed") +
+  scale_alpha_manual(values = c("0" = 0.2, "1" = 1), guide = NULL) +
+  theme_pubr() + theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+Al comparar ambos grupos, se observó que la diferencia entre hombres y mujeres en la proporción de personas que vivieron la mayor parte del tiempo con ambos padres fue de solo 0,007 (Hombre − Mujer), una diferencia bastante pequeña.
+
+Con el fin de determinar si esta diferencia podía explicarse simplemente por azar, se aplicó una prueba de permutaciones Monte Carlo con 4999 permutaciones, obteniéndose un valor p de 1.
+
+Dado que este valor p es considerablemente mayor al nivel de significación establecido (0,05), no se rechaza la hipótesis nula planteada.
+
+En consecuencia, no se cuenta con evidencia estadística suficiente para afirmar que exista una diferencia real entre hombres y mujeres de la Región Metropolitana en cuanto a haber vivido la mayor parte del tiempo con ambos padres.
+
+Adicionalmente, a partir de las mismas remuestras utilizadas en la prueba de permutaciones, se construyó un intervalo de confianza aproximado del 95 % para la diferencia de proporciones, obteniéndose el rango [-0,159; 0,189]. Como este intervalo incluye al cero, es coherente con el resultado del contraste de hipótesis: no hay evidencia de una diferencia real entre ambos grupos.
+
+---
+
+2. Propongan una pregunta de investigación original, que involucre la comparación de las medias de más de dos grupos independientes (más abajo se dan unos ejemplos). Fijando una semilla distinta a la anterior, seleccionen una muestra aleatoria de hogares (200 < n < 300) y respondan la pregunta propuesta utilizando bootstrapping. Solo por ejercicio académico, aplique un análisis post-hoc con bootstrapping aunque este no fuera necesario. Indicación: consideren que el análisis post-hoc debe hacerse con las mismas remuestras usadas para la prueba ómnibus.
+
+
+La pregunta propuesta es la siguiente:
+
+¿Existe una diferencia significativa en la cantidad promedio de hijos de las personas chilenas mayores de 40 años de acuerdo a su nivel educacional (Educación Básica, Educación Media, Profesional Completo)?
+
+Es importante resaltar que la edad mínima escogida, de 40 años, para probar la pregunta propuesta no fue escogida caprichosamente. Personas más jóvenes naturalmente han tenido menos tiempo, tanto para tener hijos, como para terminar completamente sus estudios, por lo que considerarlos para el análisis puede ser problemático, dado que estarían dando volúmen a niveles educacionales más bajos y asignando cantidades más bajas de hijos, simplemente por el hecho de haber vivido durante menos tiempo y, a pesar de que personas mayores de 40 años podrían aún continuar con sus estudios, o tener aún más hijos, se cree que es más improbable y no darían tanto volúmen vacio a cada nivel. También se tiene por supuesto que los datos son independientes entre sí
+
+Se establecen las hipótesis nula y alternativa:
+
+$H_0$: No hay diferencias significativas en la cantidad promedio de hijos de las personas chilenas mayores de 40 años según su nivel educacional. Considerando a $\mu$ como el promedio de hijos, se tiene matemáticamente hablando: $\mu_{Básica} = \mu_{Media} = \mu_{Profesional}$
+
+$H_A$: Existen diferencias significativas en la cantidad promedio de hijos de las personas chilenas mayores de 40 años según su nivel educacional. Matemáticamente hablando: $\exists$ $\mu_i \land \mu_j $ $\epsilon$ ${\mu_{Básica}, \mu_{Media}, \mu_{Profesional}}$ $|$ $\mu_i \neq \mu_j$.
+
+La columna s4 representa a la respuesta de la pregunta: "¿Cuántos hijos nacidos vivos ha tenido en su vida?". Se debe tener en consideración que esta columna solo fue respondida por personas mayores a 11 años, como se especifica en el diagrama encontrado en el libro de códigos de la Casen 2017.
+
+Los datos del cvs tienen algo extraño, ya que hay muchas instancias en las que hay personas con 21 hijos, instancias que debieran ser sumamente inusuales, y se dan situaciones imposibles, por ejemplo hay una observación de una mujer de 17 años con 21 hijos, lo que es totalmente absurdo, y no es el único caso así, hay mujeres con 19, 20 o 22 años que igualmente poseen dicha cantidad de hijos, por lo que se ha decidido filtrar esta cantidad en particular con la finalidad de evitar problemas
+
+```{r}
+# Filtro los datos de instancias extrañas
+datos_limpios = datos %>% 
+  filter(!is.na(s4), s4 != 21, edad >= 40, !is.na(e6a))
+# Defino los niveles de interés para el estudio
+niveles_interes <- c("Educación Básica", 
+                     "Educación Media Científico-Humanista", 
+                     "Profesional Completo (Carreras 4 o más años)")
+
+# Dejo solo los 3 grupos
+datos_modelo <- datos_limpios %>% 
+  filter(e6a %in% niveles_interes) %>%
+  mutate(e6a = factor(e6a, levels = niveles_interes))
+
+# Se fija una semilla
+set.seed(666)
+
+# El mandato pide muestra de hogares (200 < n < 300)
+# Asumiremos n = 250. 
+n_muestra <- 250
+muestra <- sample_n(datos_modelo, n_muestra)
+
+```
+
+Ahora se verifica que se cumplan las condiciones para poder utilizar la prueba ANOVA para muestras independientes, las cuales son: 
+
+- La variable s4 es numérica discreta, y como ya se mencionó antes, representa a la cantidad de hijos que una persona ha tenido, y se puede decir que tiene escala de razón.
+
+- Las muestras fueron obtenidas de manera aleatoria e independiente desde las muestras originales. Teniendo 250 datos en total.
+
+- Se puede suponer razonablemente que las poblaciones de origen siguen una distribución normal:
+
+```{r}
+# Verificación tosca de normalidad, repitiendo Shapiro 3 veces sobre s4
+s4_basal <- muestra$s4[muestra$e6a == "Educación Básica"]
+s4_media <- muestra$s4[muestra$e6a == "Educación Media Científico-Humanista"]
+s4_profesional <- muestra$s4[muestra$e6a == "Profesional Completo (Carreras 4 o más años)"]
+
+shapiro.test(s4_basal)
+shapiro.test(s4_media)
+shapiro.test(s4_profesional)
+
+```
+Ninguno de los grupos cumple con normalidad. En Educación Básica se obtuvo un p-value de 1.914e-08, y para Educación Media se obtuvo un p-value = 3.872e-07, mientras que para Profesional completo se obtuvo 0.04019, que es el valor más cercano al nivel de significancia. En conclusión no se cunmple con el criterio de normalidad. Sin embargo se continuará con el procedimiento a pesar de ello, ya que bootstrap tiende a generar distribuciones normales.
+
+
+```{r}
+# Calculamos el valor F de ANOVA
+anova_obs <- aov(s4 ~ e6a, data = muestra)
+F_obs <- summary(anova_obs)[[1]][["F value"]][1]
+
+```
+
+
+```{r}
+# Post-Hoc: Calculamos las diferencias absolutas de las medias observadas
+medias_obs <- tapply(muestra$s4, muestra$e6a, mean, na.rm = TRUE)
+
+diff_bas_med_obs  <- abs(medias_obs["Educación Básica"] - medias_obs["Educación Media Científico-Humanista"])
+diff_bas_prof_obs <- abs(medias_obs["Educación Básica"] - medias_obs["Profesional Completo (Carreras 4 o más años)"])
+diff_med_prof_obs <- abs(medias_obs["Educación Media Científico-Humanista"] - medias_obs["Profesional Completo (Carreras 4 o más años)"])
+
+
+# Para hacer test de hipótesis con bootstrap, debemos "centrar" los datos 
+# forzando a que todos los grupos tengan EXACTAMENTE la misma media global.
+# Así simulamos la Hipótesis Nula de que "no hay diferencias".
+media_global <- mean(muestra$s4, na.rm = TRUE)
+
+muestra_centrada <- muestra %>%
+  group_by(e6a) %>%
+  mutate(s4_nula = s4 - mean(s4, na.rm = TRUE) + media_global) %>%
+  ungroup()
+
+
+B <- 2000 # Número de remuestras (estándar académico)
+F_boot <- numeric(B)
+diff_boot_bas_med  <- numeric(B)
+diff_boot_bas_prof <- numeric(B)
+diff_boot_med_prof <- numeric(B)
+
+set.seed(98765) # Semilla para asegurar reproducibilidad del bucle
+for(i in 1:B) {
+  
+  # A) Crear la remuestra (con reemplazo) dentro de cada grupo bajo H0
+  remuestra <- muestra_centrada %>%
+    group_by(e6a) %>%
+    group_modify(~ .x[sample(seq_len(nrow(.x)), nrow(.x), replace = TRUE), ]) %>%
+    ungroup()
+  
+  # B) Prueba ÓMNIBUS en esta remuestra
+  F_boot[i] <- summary(aov(s4_nula ~ e6a, data = remuestra))[[1]][["F value"]][1]
+  
+  # C) Prueba POST-HOC en LA MISMA remuestra
+  medias_boot <- tapply(remuestra$s4_nula, remuestra$e6a, mean, na.rm = TRUE)
+  
+  diff_boot_bas_med[i]  <- abs(medias_boot["Educación Básica"] - medias_boot["Educación Media Científico-Humanista"])
+  diff_boot_bas_prof[i] <- abs(medias_boot["Educación Básica"] - medias_boot["Profesional Completo (Carreras 4 o más años)"])
+  diff_boot_med_prof[i] <- abs(medias_boot["Educación Media Científico-Humanista"] - medias_boot["Profesional Completo (Carreras 4 o más años)"])
+}
+
+
+# Calculamos qué proporción de las remuestras simuladas (azar) 
+# generaron resultados iguales o más extremos que nuestros datos reales.
+
+p_omnibus  <- mean(F_boot >= F_obs)
+p_bas_med  <- mean(diff_boot_bas_med  >= diff_bas_med_obs)
+p_bas_prof <- mean(diff_boot_bas_prof >= diff_bas_prof_obs)
+p_med_prof <- mean(diff_boot_med_prof >= diff_med_prof_obs)
+
+# Resultados finales
+cat("\n--- RESULTADOS BOOTSTRAPPING ---\n")
+cat("P-valor ANOVA:", p_omnibus, "\n")
+cat("P-valor Post-Hoc (Básica vs Media):", p_bas_med, "\n")
+cat("P-valor Post-Hoc (Básica vs Profesional):", p_bas_prof, "\n")
+cat("P-valor Post-Hoc (Media vs Profesional):", p_med_prof, "\n")
+```
+
+Con base en los resultados obtenidos, se rechaza la hipótesis nula de igualdad de medias entre los tres niveles educacionales. El valor p de la prueba ANOVA es prácticamente cero, por lo que existe evidencia estadística suficiente para afirmar que, en la muestra de personas chilenas mayores de 40 años, el promedio de hijos sí difiere según el nivel educacional.
+
+En el análisis post-hoc, las comparaciones entre Educación Básica vs. Educación Media y Educación Básica vs. Profesional Completo también resultaron significativas, lo que sugiere que el grupo con Educación Básica presenta un promedio de hijos distinto al de los otros dos grupos. En cambio, la comparación entre Educación Media y Profesional Completo no fue significativa al 5 % ($p = 0.058$), por lo que no se observa evidencia suficiente para afirmar que esos dos niveles difieran entre sí.
+
+
+
+
+
+
+
+
+
+
+
+
+

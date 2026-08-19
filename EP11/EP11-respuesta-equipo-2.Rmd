@@ -1,0 +1,409 @@
+---
+title: "EP11"
+output: html_document
+date: "2026-08-09"
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Enunciado
+
+Se utilizan los datos de medidas anatómicas recolectados por Heinz et
+al. (2003). El objetivo es usar herramientas
+avanzadas del entorno R (paquetes `leaps` y `caret`) para 
+la búsqueda y evaluación de modelos de regresión lineal múltiple (para
+predecir Peso e IMC) y de regresión logística múltiple (para predecir
+el estado nutricional, EN), evitando el sobreajuste mediante
+bootstrapping, validación cruzada repetida y validación cruzada
+dejando uno fuera, según corresponda.
+
+```{r librerias, message=FALSE, warning=FALSE}
+# leaps: búsqueda exhaustiva de subconjuntos de predictores
+if (!require(leaps)) install.packages("leaps")
+library(leaps)
+
+# caret: entrenamiento/evaluación de modelos (bootstrap, RFE, CV)
+if (!require(caret)) install.packages("caret")
+library(caret)
+
+# pROC: curvas ROC para el modelo de regresión logística
+if (!require(pROC)) install.packages("pROC")
+library(pROC)
+
+# car: diagnóstico de modelos de regresión (vif, residualPlots, etc.)
+if (!require(car)) install.packages("car")
+library(car)
+```
+
+# Preparación de los datos: variables IMC y EN
+
+```{r datos-imc-en}
+# Carga de los datos entregados (separador ";" y decimales con coma)
+datos <- read.csv2("EP09 Datos.csv")
+cat("Dimensiones del conjunto de datos:", dim(datos), "\n")
+
+# IMC = peso (kg) / estatura (m)^2. Height está registrada en cm.
+datos$IMC <- datos$Weight / (datos$Height / 100)^2
+
+# Estado nutricional (EN), dicotómico: sobrepeso si IMC >= 23,2
+#  (los niveles se escriben sin espacio, "no_sobrepeso", porque más adelante caret necesita nombres de nivel válidos como identificadorde R para poder construir columnas de probabilidad por clase)
+datos$EN <- factor(ifelse(datos$IMC >= 23.2, "sobrepeso", "no_sobrepeso"),
+                    levels = c("no_sobrepeso", "sobrepeso"))
+
+cat("\nResumen de IMC:\n")
+print(summary(datos$IMC))
+cat("\nDistribución de EN en los 507 casos:\n")
+print(table(datos$EN))
+```
+
+Se crea la variable IMC como el cociente entre el peso (en kg) y el
+cuadrado de la estatura (en m, transformada desde los cm registrados
+en Height), y a partir de ella la variable dicotómica EN, que
+clasifica a cada persona como "sobrepeso" (IMC ≥ 23,2) o "no sobrepeso"
+(IMC < 23,2). En el conjunto completo (507 personas) la distribución
+queda razonablemente equilibrada: 256 personas no sobrepeso y 251
+sobrepeso, con un IMC promedio de 23,46 y un rango de 16,88 a 38,19.
+
+# 1. Semilla y 2. Selección de la muestra balanceada
+
+Se define como semilla los primeros cinco dígitos del RUN del
+integrante de mayor edad del equipo (20937), y se selecciona una
+muestra de 100 personas del conjunto de datos, asegurando que la
+mitad (50) tenga estado nutricional "sobrepeso" y la otra mitad (50)
+"no sobrepeso", de modo que las clases queden balanceadas para las
+tareas de regresión (predicción de Peso e IMC) y de clasificación
+(predicción de EN) que siguen.
+
+```{r p1-p2-semilla-muestra}
+seed <- 20937
+
+# Se separan los "pools" de personas sobrepeso y no sobrepeso, para muestrear cada grupo por separado y así asegurar el balance
+pool_sobrepeso    <- datos[datos$EN == "sobrepeso", ]
+pool_no_sobrepeso <- datos[datos$EN == "no_sobrepeso", ]
+
+# 50 personas al azar del grupo "sobrepeso"
+set.seed(seed)
+i_sobrepeso <- sample(nrow(pool_sobrepeso), 50)
+muestra_sobrepeso <- pool_sobrepeso[i_sobrepeso, ]
+
+# 50 personas al azar del grupo "no_sobrepeso"
+set.seed(seed)
+i_no_sobrepeso <- sample(nrow(pool_no_sobrepeso), 50)
+muestra_no_sobrepeso <- pool_no_sobrepeso[i_no_sobrepeso, ]
+
+# Se combinan ambos subgrupos en la muestra final de 100 personas
+muestra <- rbind(muestra_sobrepeso, muestra_no_sobrepeso)
+
+cat("Tamaño de la muestra:", nrow(muestra), "\n")
+cat("\nDistribución de EN en la muestra:\n")
+print(table(muestra$EN))
+cat("\nResumen de IMC en la muestra:\n")
+print(summary(muestra$IMC))
+```
+
+La muestra queda balanceada por construcción (50 casos "sobrepeso" y
+50 "no sobrepeso"), ya que el muestreo se realizó por separado dentro
+de cada grupo definido por EN. Esto es relevante tanto para el modelo
+de regresión logística del punto 5 (evita que el modelo aprenda a
+favor de la clase mayoritaria) como para los modelos de regresión
+lineal de los puntos 3 y 4, que se construirán y evaluarán sobre esta
+misma muestra de 100 personas. El IMC de la muestra (media 23,61;
+mediana 23,14; rango 18,33-38,19) es muy similar al del conjunto
+completo (media 23,46; rango 16,88-38,19), lo que indica que, pese al
+balanceo forzado por EN, la muestra sigue siendo representativa en
+términos de la variable continua subyacente y no introduce un sesgo
+evidente hacia valores extremos de IMC.
+
+# 3. Modelo de RLM para Peso: selección exhaustiva (leaps) y evaluación con bootstrapping (caret)
+
+```{r p3-leaps}
+# Variable de respuesta y conjunto de predictores válidos: todas las
+# medidas corporales más Age/Gender, sin IMC ni EN (derivadas de Peso)
+respuesta_peso <- "Weight"
+excluir_peso <- c("Weight", "IMC", "EN")
+predictores_pool_peso <- setdiff(names(muestra), excluir_peso)
+
+# Búsqueda exhaustiva de leaps sobre ese conjunto de predictores, probando subconjuntos de 1 a 8 variables (se filtra a 2-8 más abajo)
+subconjuntos_peso <- regsubsets(x = muestra[, predictores_pool_peso],
+                                 y = muestra[[respuesta_peso]],
+                                 nbest = 1, nvmax = 8,
+                                 method = "exhaustive")
+resumen_peso <- summary(subconjuntos_peso)
+
+# Se restringe la comparación a tamaños entre 2 y 8 predictores y se elige, entre esos tamaños, el modelo de menor BIC: el criterio que mejor equilibra ajuste y parsimonia, penalizando predictores que no aportan y ayudando a evitar el sobreajuste antes de pasar a la evaluación con bootstrap
+tam_validos_peso <- 2:8
+mejor_tam_peso <- tam_validos_peso[which.min(resumen_peso$bic[tam_validos_peso])]
+cat("Tamaño de subconjunto elegido:", mejor_tam_peso, "predictores\n")
+
+predictores_peso <- names(which(resumen_peso$which[mejor_tam_peso, -1]))
+cat("Predictores seleccionados para Peso:\n")
+print(predictores_peso)
+
+cat("\nBIC por tamaño de subconjunto (2 a 8 predictores):\n")
+print(round(resumen_peso$bic[tam_validos_peso], 1))
+```
+
+El BIC decrece con fuerza hasta los 5-6 predictores (de -232,0 con 2
+predictores a -373,2 con 6) y luego empeora levemente con 7 y 8
+predictores (-371,9 y -372,4), señal de que agregar más variables deja
+de aportar y empieza a penalizar por complejidad innecesaria. El
+mínimo se alcanza en 6 predictores: `Chest.Girth`, `Waist.Girth`,
+`Hip.Girth`, `Bicep.Girth`, `Calf.Maximum.Girth` y `Height`. Todos son
+medidas de contorno corporal (pecho, cintura, cadera, bíceps,
+pantorrilla) más la estatura, lo que tiene sentido biométrico: son
+justamente las dimensiones que más covarían con la masa corporal.
+
+```{r p3-modelo-boot}
+formula_peso <- as.formula(paste(respuesta_peso, "~",
+                                  paste(predictores_peso, collapse = " + ")))
+cat("Fórmula del modelo:\n")
+print(formula_peso)
+
+# Se construye el modelo con caret::train, usando bootstrapping (999
+# remuestreos) para evaluar su desempeño esperado en datos no usados
+# para ajustarlo en cada réplica
+set.seed(seed)
+control_boot <- trainControl(method = "boot", number = 999)
+
+modelo_peso <- train(formula_peso, data = muestra, method = "lm",
+                      trControl = control_boot)
+
+print(modelo_peso)
+cat("\nResumen del modelo final (ajustado con los 100 casos):\n")
+print(summary(modelo_peso$finalModel))
+```
+
+El modelo ajustado con los 100 casos explica el 98,27% de la
+variabilidad del Peso (R² = 0,9827; R² ajustado = 0,9815), con los
+seis predictores estadísticamente significativos (todos p < 0,05, la
+mayoría p < 0,001) y un error estándar residual de 1,845 kg. La
+evaluación con bootstrapping (999 remuestreos), que estima el
+desempeño del modelo en datos no usados para ajustar cada réplica,
+entrega un R² promedio de 0,9784, un RMSE de 2,04 kg y un MAE de 1,61
+kg. Estos valores son muy cercanos a los del ajuste sobre los 100
+casos completos (error residual 1,845 kg vs. RMSE bootstrap 2,04 kg),
+por lo que la brecha entre ajuste y validación es pequeña, no hay
+evidencia de sobreajuste relevante y el modelo debería generalizar
+razonablemente bien a personas nuevas de características similares a
+las de la muestra. En términos de calidad predictiva, un error típico
+de ~2 kg es pequeño frente al rango habitual de peso corporal adulto
+(decenas de kilos), por lo que el modelo tiene un buen poder
+predictivo práctico, no solo un buen ajuste.
+
+```{r p3-diagnostico}
+# Diagnóstico de las condiciones de la RLM sobre el modelo final
+modelo_peso_lm <- modelo_peso$finalModel
+
+cat("Factores de inflación de la varianza (multicolinealidad):\n")
+print(vif(modelo_peso_lm))
+
+par(mfrow = c(2, 2))
+plot(modelo_peso_lm)
+```
+
+**Linealidad y homocedasticidad:** en el gráfico de residuos vs. valores ajustados los puntos se reparten sin una curvatura clara alrededor de 0, lo que apoya la linealidad; en el de escala-ubicación la línea roja muestra una leve tendencia creciente, sugiriendo un indicio menor de heterocedasticidad (la dispersión de residuos crece levemente con los valores ajustados), aunque no se observa un embudo marcado para casos claramente problemáticos, por lo que se interpreta como un riesgo menor y no como un incumplimiento grave de la condición.
+
+**Normalidad de los residuos:** en el gráfico Q-Q los puntos siguen razonablemente la diagonal en la parte central, pero se separan de ella en la cola superior (observaciones 239 y 221), indicando colas algo más pesadas que la normal. Con solo 2-3 casos atípicos en 100 observaciones, se interpreta como una desviación menor y localizada más que un incumplimiento sistemático de la normalidad.
+
+**Casos influyentes:** en el gráfico de residuos vs. apalancamiento destaca el caso 474, con apalancamiento notoriamente mayor al resto (~0,3), y en menor medida 221 y 129. Ninguno de ellos cruza el contorno de distancia de Cook de 0,5, por lo que, con el criterio habitual (Cook > 1 como señal de alerta fuerte), no se consideran observaciones lo bastante influyentes como para excluirlas; de todos modos, el caso 474 queda identificado como el más sensible a revisar si se dispusiera de más información sobre esa persona.
+
+**Multicolinealidad (VIF):** `Chest.Girth` presenta VIF = 14,04, por sobre el umbral habitual de 10, y `Bicep.Girth` un VIF = 8,16, cercano a ese límite, ambos son esperables porque el contorno de pecho y de bíceps están correlacionados con las demás medidas de contorno corporal incluidas en el modelo (cintura, cadera, pantorrilla), ya que miden conceptos corporales muy parecidos entre sí. Este VIF alto es un riesgo para la interpretación individual de esos coeficientes (sus errores estándar están inflados y su valor puntual es menos estable), pero no invalida el uso del modelo con fines predictivos: como el objetivo de este punto es predecir Peso y no explicar causalmente el efecto de cada medida por separado, y el desempeño fuera de muestra ya verificado con bootstrap (R² = 0,978, RMSE = 2,04 kg) es sólido, se opta por mantener el modelo tal como lo entregó la búsqueda exhaustiva en vez de eliminar predictores, dejando explícitamente indicado este riesgo de multicolinealidad en vez de corregirlo.
+
+**Conclusión (modelo de Peso):** el modelo con 6 predictores (`Chest.Girth`, `Waist.Girth`, `Hip.Girth`, `Bicep.Girth`,`Calf.Maximum.Girth`, `Height`) tiene un ajuste muy alto (R² = 0,9827) que se mantiene prácticamente igual al evaluarlo con bootstrapping (R²= 0,978; RMSE = 2,04 kg; MAE = 1,61 kg), por lo que es confiable y generaliza bien a datos no usados para ajustarlo. Las condiciones de linealidad y normalidad se cumplen razonablemente, con desviaciones menores y localizadas (leve heterocedasticidad, un par de residuos con colas pesadas, un caso de mayor apalancamiento sin ser críticamente influyente); el principal riesgo identificado es la multicolinealidad de `Chest.Girth` y, en menor medida, `Bicep.Girth`, que no compromete la capacidad predictiva del modelo pero sí la interpretación aislada de esos coeficientes. En conjunto, es un modelo con buen poder predictivo para estimar el peso de una persona a partir de sus medidas corporales.
+
+# 4. Modelo de RLM para IMC: selección con RFE (caret) y validación cruzada repetida
+
+Para este modelo se usa eliminación recursiva de predictores (RFE) del paquete `caret`, que en cada iteración ajusta el modelo, ordena los predictores por importancia y va descartando los menos relevantes, evaluando cada tamaño de subconjunto candidato con remuestreo. Se pide explorar entre 10 y 20 predictores, maximizando R², usando cinco repeticiones de validación cruzada de cinco pliegues (5x5-fold CV) como mecanismo para evitar el sobreajuste en la propia selección de variables. Se excluyen Weight, Height y EN, ya que son las variables usadas para construir IMC o derivadas directamente de él.
+
+```{r p4-rfe-imc}
+# Variable de respuesta y predictores válidos: se excluyen Weight y
+# Height (con las que se construye IMC) y EN (derivada de IMC)
+respuesta_imc <- "IMC"
+excluir_imc <- c("IMC", "Weight", "Height", "EN")
+predictores_pool_imc <- setdiff(names(muestra), excluir_imc)
+
+# RFE con modelo lineal (lmFuncs), tamaños candidatos de 10 a 20
+# predictores, evaluados con 5 repeticiones de CV de 5 pliegues,
+# seleccionando el tamaño que maximiza R² (metric = "Rsquared")
+control_rfe_imc <- rfeControl(functions = lmFuncs, method = "repeatedcv",
+                               number = 5, repeats = 5)
+
+set.seed(seed)
+rfe_imc <- rfe(x = muestra[, predictores_pool_imc],
+               y = muestra[[respuesta_imc]],
+               sizes = 10:20,
+               rfeControl = control_rfe_imc,
+               metric = "Rsquared")
+
+print(rfe_imc)
+
+predictores_imc <- predictors(rfe_imc)
+cat("\nNúmero de predictores elegidos:", length(predictores_imc), "\n")
+cat("Predictores seleccionados para IMC:\n")
+print(predictores_imc)
+
+plot(rfe_imc, type = c("g", "o"))
+```
+
+El gráfico de R² (validado con 5x5-fold CV) contra el número de variables muestra un "codo" claro: el R² sube fuerte de 10 a 13 predictores (de 0,859 a 0,903) y luego se aplana, con un máximo suave en 16 predictores (R² = 0,9053, RMSE = 1,173, MAE = 0,926) antes de empezar a bajar levemente hacia 19-20 y 23 (el conjunto completo de 23 predictores candidatos, que RFE evalúa siempre como referencia). Agregar predictores más allá de 13-14 aporta ganancias marginales de R², lo que es esperable: la validación cruzada repetida evita que esa ganancia marginal (que sí seguiría creciendo si se mirara solo el ajuste dentro de la muestra) lleve a sobreajustar eligiendo demasiadas variables. RFE elige 16 predictores. Entre los cinco más importantes aparece `Gender`, lo cual tiene sentido biométrico aunque no participe en la fórmula del IMC: hombres y mujeres tienden a distribuir la masa corporal de forma distinta para una misma relación peso/estatura, por lo que el sexo ayuda indirectamente a predecir el IMC a partir de otras medidas corporales.
+
+```{r p4-diagnostico}
+# rfe_imc$fit es el modelo ya ajustado con los 16 predictores
+# elegidos, usando los 100 casos completos
+modelo_imc_lm <- rfe_imc$fit
+
+cat("Resumen del modelo final para IMC:\n")
+print(summary(modelo_imc_lm))
+
+cat("\nFactores de inflación de la varianza (multicolinealidad):\n")
+print(vif(modelo_imc_lm))
+
+par(mfrow = c(2, 2))
+plot(modelo_imc_lm)
+```
+
+El modelo final con los 16 predictores ajustado sobre los 100 casos alcanza R² = 0,9452 (R² ajustado = 0,9346), con error estándar residual de 0,952 y F = 89,43 (p < 2,2e-16), por lo que en conjunto es altamente significativo. Sin embargo, a nivel individual varios coeficientes no son significativos (`Wrist.Minimum.Girth`, `Ankles.diameter`, `Forearm.Girth`, `Elbows.diameter`, `Ankle.Minimum.Girth`, `Chest.depth`, `Chest.diameter`, y `Gender` y `Wrists.diameter` en el límite, p ≈ 0,086 y 0,095), mientras que `Bitrochanteric.diameter`, `Hip.Girth` y `Waist.Girth` son los más claramente significativos (p < 0,001). Esto es consistente con predictores correlacionados entre sí: aportan en conjunto pero se "reparten" el crédito individualmente.
+
+**Linealidad y homocedasticidad:** en residuos vs. ajustados no hay una curva marcada, aunque la recta roja se inclina levemente al final del rango. En escala-ubicación la tendencia creciente es más clara que en el modelo de Peso, indicando un indicio de heterocedasticidad algo mayor: la variabilidad de los residuos parece crecer para IMC ajustados más altos.
+
+**Normalidad de los residuos:** el Q-Q muestra buen ajuste a la diagonal en el tramo central, pero el caso 474 se aleja claramente en la cola superior (residuo estandarizado > 2,5) y los casos 3 y 360 se apartan levemente en la cola inferior. Son desviaciones puntuales, no un patrón sistemático de no normalidad. 
+
+**Casos influyentes:** el caso 474 vuelve a destacar, ahora de forma más marcada que en el modelo de Peso tiene apalancamiento cercano a 0,45-0,5, el mayor residuo estandarizado del conjunto, y se ubica muy cerca del contorno de distancia de Cook = 0,5 en el gráfico de residuos vs. apalancamiento. Que la misma observación aparezca como atípica en dos modelos distintos sugiere que corresponde a una persona con una combinación de medidas corporales genuinamente inusual en la muestra, más que a un error puntual de un solo modelo. Con el criterio de Cook > 1 no se excluye formalmente, pero queda señalada como el principal riesgo a revisar (por ejemplo, reajustando el modelo sin ese caso para comprobar si los coeficientes cambian de forma relevante).
+
+**Multicolinealidad (VIF):** la multicolinealidad es más extendida que en el modelo de Peso: `Forearm.Girth` (VIF = 18,87), `Bicep.Girth` (11,69) y `Wrist.Minimum.Girth` (11,57) superan el umbral de 10, y `Waist.Girth` (9,51), `Gender` (7,74), `Elbows.diameter` (7,81) y `Hip.Girth` (7,28) se acercan a él. Con 16 predictores, muchos de ellos medidas de contorno o diámetro que covarían fuertemente entre sí, esto es esperable y explica los coeficientes no significativos señalados arriba. De nuevo, como el objetivo es predictivo y no busca aislar el efecto causal de cada medida, se mantiene el modelo entregado por RFE en vez de forzar una reducción adicional de predictores, dejando este riesgo explícitamente indicado.
+
+**Generalidad:** aquí sí aparece una brecha más notoria que en el modelo de Peso, el ajuste completo tiene R² = 0,9452, mientras que la validación cruzada repetida (5x5-fold) estima R² = 0,9053 y RMSE = 1,173. La diferencia (~0,04 en R²) es señal de un optimismo moderado del ajuste dentro de la muestra respecto al desempeño esperado en datos nuevos. Esto es coherente con la razón de observaciones por predictor, con 100 casos y 16 predictores hay apenas 6,25 observaciones por predictor, por debajo de las 10-15 recomendadas para que un modelo de RLM sea confiable, lo que aumenta el riesgo de un ajuste algo optimista aunque la CV ya esté mitigando ese sobreajuste en la propia selección de variables.
+
+**Calidad predictiva:** el RMSE de validación cruzada (1,173) frente al rango de IMC en la muestra (18,33 a 38,19, ~20 unidades) implica un error típico de entre 5% y 6% del rango de la variable, y el R² de 0,905 sigue siendo alto en términos absolutos. Es un buen modelo predictivo, aunque algo menos preciso y menos parsimonioso que el de Peso.
+
+**Conclusión (modelo de IMC):** el modelo de 16 predictores tiene un buen desempeño predictivo (R²_CV = 0,905, RMSE = 1,173), pero es menos confiable que el modelo de Peso, la razón de observaciones por predictor está por debajo de lo recomendado, hay multicolinealidad más extendida (varios VIF > 10) y una brecha más visible entre el ajuste dentro de muestra y el desempeño validado con CV. La observación 474 se repite como caso atípico/influyente en ambos modelos y es el principal punto a revisar si se quisiera mejorar la robustez del ajuste. Aun así, la validación cruzada repetida cumple su función, evita quedarse con un modelo sobreajustado y entrega una estimación realista (no artificialmente optimista) de qué tan bien predice el modelo en datos nuevos.
+
+# 5. Modelo de regresión logística para EN: selección con RFE (caret) y validación cruzada dejando uno fuera
+
+Para este modelo se usa nuevamente RFE, pero envolviendo `caret::train`
+con un modelo de regresión logística (`method = "glm"`, `family =
+"binomial"`) mediante `caretFuncs`, de forma que en cada subconjunto
+candidato se pueda evaluar el área bajo la curva ROC (métrica `"ROC"`,
+que requiere probabilidades de clase). El remuestreo externo de RFE
+usa validación cruzada dejando uno fuera (LOOCV) para evitar el
+sobreajuste en la selección, y se exploran subconjuntos de entre 2 y 6
+predictores. Se excluyen Weight, Height e IMC.
+
+```{r p5-rfe-en}
+# Variable de respuesta y predictores válidos: se excluyen Weight y
+# Height (con las que se construye IMC) e IMC (con el que se define EN)
+respuesta_en <- "EN"
+excluir_en <- c("EN", "Weight", "Height", "IMC")
+predictores_pool_en <- setdiff(names(muestra), excluir_en)
+
+# Control interno de train(): un solo ajuste por subconjunto (sin
+# remuestreo interno adicional), calculando probabilidades de clase
+# para poder evaluar la curva ROC
+control_interno_en <- trainControl(method = "none", classProbs = TRUE,
+                                    summaryFunction = twoClassSummary)
+
+# caretFuncs usa por defecto una función de resumen basada en
+# Accuracy; para que RFE pueda evaluar y comparar subconjuntos según
+# el área bajo la curva ROC hay que reemplazar explícitamente esa
+# función de resumen por twoClassSummary
+funciones_rfe_en <- caretFuncs
+funciones_rfe_en$summary <- twoClassSummary
+
+# Control externo de RFE: LOOCV
+control_rfe_en <- rfeControl(functions = funciones_rfe_en, method = "LOOCV")
+
+# Al ajustar un glm en cada uno de los 100 pliegues de LOOCV (para cada tamaño candidato entre 2 y 6 predictores) es esperable que varios de esos ajustes muestren avisos de (cuasi) separación perfecta ("algorithm did not converge", "fitted probabilities numerically 0 or 1 occurred"); se explica esta situación más abajo en el análisis, por lo que aquí solo se silencian para no llenar el output con cientos de avisos repetidos
+set.seed(seed)
+rfe_en <- suppressWarnings(
+  rfe(x = muestra[, predictores_pool_en],
+      y = muestra[[respuesta_en]],
+      sizes = 2:6,
+      rfeControl = control_rfe_en,
+      method = "glm",
+      family = "binomial",
+      metric = "ROC",
+      trControl = control_interno_en)
+)
+
+print(rfe_en)
+
+predictores_en <- predictors(rfe_en)
+cat("\nPredictores seleccionados para EN:\n")
+print(predictores_en)
+
+plot(rfe_en, type = c("g", "o"))
+```
+
+```{r p5-modelo-loocv}
+# Fórmula con los predictores elegidos por RFE
+formula_en <- as.formula(paste(respuesta_en, "~",
+                                paste(predictores_en, collapse = " + ")))
+cat("Fórmula del modelo:\n")
+print(formula_en)
+
+# Modelo final con los predictores elegidos, evaluado con LOOCV
+# (cada observación se deja fuera una vez como caso de prueba)
+ctrl_loocv <- trainControl(method = "LOOCV", classProbs = TRUE,
+                            summaryFunction = twoClassSummary,
+                            savePredictions = "final")
+
+# Mismo motivo que en el chunk anterior: se silencian los avisos de convergencia/separación repetidos en los 100 ajustes de LOOCV, ya comentados en el análisis de bondad de ajuste más abajo
+set.seed(seed)
+modelo_en <- suppressWarnings(
+  train(formula_en, data = muestra, method = "glm",
+        family = "binomial", metric = "ROC",
+        trControl = ctrl_loocv)
+)
+
+print(modelo_en)
+
+# Curva ROC construida con las probabilidades predichas en LOOCV
+# (cada predicción corresponde a un caso que no participó en supropio ajuste)
+roc_en <- roc(response = modelo_en$pred$obs,
+              predictor = modelo_en$pred$sobrepeso,
+              levels = c("no_sobrepeso", "sobrepeso"))
+cat("\nÁrea bajo la curva ROC (LOOCV):", auc(roc_en), "\n")
+plot(roc_en, print.auc = TRUE)
+
+# Matriz de confusión con las predicciones LOOCV, umbral por defecto 0,5
+cat("\nMatriz de confusión (LOOCV, umbral 0,5):\n")
+print(confusionMatrix(modelo_en$pred$pred, modelo_en$pred$obs,
+                       positive = "sobrepeso"))
+```
+
+```{r p5-diagnostico}
+# Modelo glm ajustado con los 6 predictores sobre los 100 casos
+modelo_en_glm <- modelo_en$finalModel
+
+cat("Resumen del modelo final para EN:\n")
+print(summary(modelo_en_glm))
+
+cat("\nFactores de inflación de la varianza (multicolinealidad):\n")
+print(vif(modelo_en_glm))
+```
+
+**Selección de predictores:** el ROC (LOOCV) sube de 0,826 con 2 predictores a 0,827 con 3 (casi sin cambio), luego salta a 0,876 con 4 y sigue subiendo hasta un máximo de 0,897 con 6 predictores (marcado con `*`), y baja a 0,882 al usar las 23 variables candidatas completas. Que el modelo con las 23 variables rinda peor que el de 6 es la evidencia más clara de que agregar predictores de más perjudica la capacidad de generalización (sobreajuste), y confirma que RFE con LOOCV cumple su objetivo. El subconjunto elegido, de tamaño 6 (dentro del rango 2-6), es `Age`, `Wrist.Minimum.Girth`, `Ankle.Minimum.Girth`, `Calf.Maximum.Girth`, `Navel.Girth` y `Shoulder.Girth`.
+
+**Modelo:** el modelo logístico ajustado con los 100 casos reduce la deviance de 138,63 (modelo nulo, solo intercepto) a 39,70 con los 6 predictores (AIC = 53,70), una disminución de 98,93 en 6 grados de libertad muy por sobre el valor crítico de referencia (χ² con 6 gl ≈ 12,6 al 5%), por lo que el modelo completo es claramente mejor que el nulo. A nivel individual, `Ankle.Minimum.Girth` (p = 0,020) y `Navel.Girth` (p = 0,001) son significativos, `Wrist.Minimum.Girth` está en el límite (p = 0,072), y `Age`, `Calf.Maximum.Girth` y `Shoulder.Girth` no lo son de forma individual (p > 0,15); esto es esperable en un subconjunto elegido para maximizar poder predictivo conjunto (ROC) y no significancia individual de cada coeficiente.
+
+**Bondad de ajuste — advertencia de separación:** al ajustar cada una de las 100 réplicas de LOOCV aparecen repetidamente los avisos `algorithm did not converge` y `fitted probabilities numerically 0 or 1 occurred`. Esto es la señal de (cuasi) separación perfecta: al dejar fuera una observación, el resto de los datos queda casi completamente separable por estos predictores tan discriminativos, por lo que algunas de las 100 estimaciones de máxima verosimilitud son numéricamente inestables (aunque el modelo final ajustado con los 100 casos sí converge con normalidad, en 7 iteraciones, sin avisos). El riesgo que esto implica es que las métricas LOOCV podrían estar levemente sobreestimadas u optimistas en esas réplicas puntuales, y que los errores estándar de los coeficientes en esos ajustes parciales pueden no ser confiables; no se corrige (por ejemplo, con regresión logística penalizada/Firth) porque el objetivo del ejercicio es ilustrar el uso de RFE con LOOCV, pero queda documentado como una limitación real del modelo, no como un resultado sin problemas. En cuanto a las demás condiciones, el VIF es bajo para los 6 predictores (máximo 3,80 en `Wrist.Minimum.Girth`), por lo que la multicolinealidad no es un problema en este modelo (a diferencia de los de Peso e IMC).
+
+**Generalidad y calidad predictiva:** aquí conviene comparar dos números de ROC que no son lo mismo, aunque ambos vengan de LOOCV. El ROC = 0,897 reportado por `rfe_en` para tamaño 6 corresponde a repetir, en cada una de las 100 iteraciones de LOOCV, el proceso completo de volver a rankear predictores con los 99 casos de entrenamiento de esa iteración y quedarse con los 6 mejores de esa iteración (que no siempre son exactamente los mismos 6 nombres entre iteración e iteración); es, por lo tanto, una estimación honesta de qué tan bien generaliza el *procedimiento* de selección + ajuste con 6 predictores. En cambio, el ROC = 0,954 obtenido en `p5-modelo-loocv` corresponde a tomar el conjunto fijo de 6 predictores ya elegidos usando los 100 casos completos y solo volver a *ajustar* ese modelo fijo con LOOCV, como esos 6 predictores ya "vieron" los 100 casos al momento de ser elegidos, este segundo número es más optimista y no es una medida completamente libre de esta forma de sobreajuste (fuga de información) en la selección de variables. La brecha entre ambos (0,897 vs. 0,954) es en sí misma informativa, da una idea de cuánto optimismo introduce fijar los predictores usando toda la muestra antes de evaluar. Aún con esa salvedad, incluso el número más conservador (ROC = 0,897) sigue siendo un buen resultado, muy por sobre 0,5 (azar). Con el umbral por defecto (0,5) sobre las probabilidades LOOCV del modelo fijo, la matriz de confusión da una exactitud de 0,85 (IC 95%: 0,76-0,91), sensibilidad de 0,82 y especificidad de 0,88 para detectar "sobrepeso" (los valores de Sens/Spec = 0,88/0,82 que imprime `train()` corresponden a la misma matriz, pero usando `no_sobrepeso` como clase de referencia por defecto de `twoClassSummary`). Con 50 casos de cada clase en la muestra, un valor predictivo positivo de 0,87 y uno negativo de 0,83 confirman que los errores están razonablemente equilibrados entre ambas clases.
+
+**Conclusión (modelo de EN):** el modelo logístico con 6 predictores tiene buen poder predictivo, aunque el ROC exacto depende de cómo se mida: 0,897 en la validación honesta del proceso completo de selección (la cifra más defendible para hablar de generalización) y 0,954 al validar solo el modelo final ya fijado, un número más optimista por la fuga de información propia de fijar los predictores con toda la muestra. A diferencia de los modelos de Peso e IMC, no presenta problemas relevantes de multicolinealidad, pero sí evidencia (cuasi) separación perfecta en varias de las 100 reestimaciones de LOOCV, un riesgo que se documenta como limitación en vez de corregir. En conjunto, sigue siendo el modelo más discriminativo de los tres, con la salvedad de que su exactitud real en datos nuevos probablemente se ubique más cerca del 0,85-0,90 que del optimista 0,95. 
+# 6. Conclusión general: confiabilidad y poder predictivo de los tres modelos
+
+Los tres modelos construidos —RLM para Peso (bootstrap), RLM para IMC (RFE con CV repetida 5x5) y regresión logística para EN (RFE con LOOCV)— tienen en común que fueron evaluados con una técnica de remuestreo distinta en cada caso, que estima su desempeño en datos no usados para ajustarlos y así evita quedarse con un modelo sobreajustado a la muestra de 100 personas.
+
+El modelo de **Peso** es el más confiable de los tres: ajuste casi perfecto (R² = 0,9827) que se mantiene prácticamente igual al validar con bootstrap (R² = 0,978; RMSE = 2,04 kg), con solo 6 predictores y una razón amplia de observaciones por predictor (~16,7). Su única debilidad es la multicolinealidad de `Chest.Girth`, que no afecta la predicción pero sí la interpretación aislada de ese coeficiente.
+
+El modelo de **IMC** tiene buen poder predictivo (R²_CV = 0,905, RMSE = 1,17) pero es el menos confiable de los tres: usa 16 predictores para 100 casos (~6,25 observaciones por predictor, bajo lo recomendado), tiene multicolinealidad extendida (varios VIF > 10) y muestra la brecha más visible entre ajuste dentro de muestra (R² = 0,945) y desempeño validado (R² = 0,905), señal de un cierto grado de sobreajuste que la validación cruzada repetida logra atenuar, aunque no eliminar del todo. Además, la observación 474 aparece como caso atípico/influyente tanto en este modelo como en el de Peso.
+
+El modelo de **EN** tiene el mejor poder predictivo relativo de los tres en términos de discriminación (ROC entre 0,897, la estimación honesta del proceso completo de selección, y 0,954 al validar solo el modelo final fijo) y no presenta multicolinealidad, pero su ajuste revela (cuasi) separación perfecta en varias de las reestimaciones LOOCV, un riesgo propio de la regresión logística con predictores muy discriminantes en muestras moderadas, que se deja documentado en vez de corregir.
+
+En síntesis, los tres modelos son útiles y con buen poder predictivo, pero no igualmente confiables: el de Peso es el más sólido, el de IMC es el que exige mayor cautela por su relación predictores/observaciones y su multicolinealidad, y el de EN es muy discriminativo pero requiere tener presente el riesgo de separación perfecta al interpretar los coeficientes individuales de sus reajustes.

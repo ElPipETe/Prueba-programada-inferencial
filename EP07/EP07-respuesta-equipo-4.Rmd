@@ -1,0 +1,323 @@
+---
+title: "EP07"
+output: html_document
+---
+
+
+```{r setup, include=FALSE, warning = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+paquetes <- c("boot", "car", "ggplot2", "ggpubr", "grid", "gridExtra",
+              "kableExtra", "knitr", "multcomp", "nlme", "plyr",
+              "RVAideMemoire", "rcompanion", "dplyr", "tidyr", "readr",
+              "nortest", "moments")
+
+install_if_missing <- function(p) {
+  if (!require(p, character.only = TRUE)) {
+    install.packages(p)
+    library(p, character.only = TRUE)
+  }
+}
+invisible(sapply(paquetes, install_if_missing))
+library(conflicted)
+conflicts_prefer(dplyr::select)
+conflicts_prefer(dplyr::filter)
+conflicts_prefer(dplyr::mutate)
+```
+# Contexto
+
+En el trabajo de título de una estudiante del DIINF se reportan tiempos de ejecución (en milisegundos) y la cercanía con la solución óptima (en por ciento) de la mejor solución encontrada con tres versiones de un algoritmo genético para resolver instancias del problema del vendedor viajero disponibles en repositorios públicos. Ahora debe enfrentar el análisis de estos datos, por que está solicitando ayuda de las y los estudiantes de Estadística Inferencial.
+
+```{r}
+#cargar datos
+datos <- read_csv("EP07 Datos.csv")
+```
+
+
+# Preguntas
+
+## Pregunta 1 
+
+Observando los datos, la memorista sospecha que hay diferencias significativas en el tiempo de ejecución entre las versiones A y C del algoritmo cuando las instancias tienen 60 o más nodos. ¿Los datos respaldan la intuición de la memorista? Para responder, filtren los datos para tener las instancias con 60 o más nodos y seleccionen las columnas de los tiempos de ejecución de las versiones A y C en formato ancho. Usando como semilla el valor 33, obtenga muestras aleatorias independientes de 24 tiempos registrados por la versión A y 18 tiempos registrados por la versión C del algoritmo. Realicen un análisis estadístico pertinente (enunciar hipótesis, revisar condiciones, seleccionar pruebas ómnibus y post-hoc según corresponda) para responder la pregunta planteada, utilizando pruebas no paramétricas de ser necesario.
+
+**Hipótesis Iniciales**
+
+**H0**: Los tiempos promedios de ejecución de las versiones A y C son iguales.
+
+**HA**: Hay una diferencia significativa en los tiempos promedios.
+
+Preparacion de los datos:
+
+```{r}
+# Filtrar instancias con 60 o más nodos
+datos_60 <- datos %>% filter(n.nodos >= 60)
+
+# Obtener muestras de la semilla 33
+set.seed(33)
+muestra_A <- sample(datos_60$tiempo.A, size = 24, replace = FALSE)
+muestra_C <- sample(datos_60$tiempo.C, size = 18, replace = FALSE)
+
+# Crear dataframe en formato largo para el analisis
+df_analisis <- data.frame(
+  tiempo = c(muestra_A, muestra_C),
+  version = factor(c(rep("A", 24), rep("C", 18)))
+)
+```
+
+Para utilizar pruebas paramétricas, se requiere que las poblaciones sigan una distribución normal. Por lo cual utlizamos Shapiro-Wilk para verificar el supuesto de normalidad.
+
+```{r}
+shapiro_A <- shapiro.test(muestra_A)
+shapiro_C <- shapiro.test(muestra_C)
+
+print(list(Muestra_A = shapiro_A, Muestra_C = shapiro_C))
+```
+
+**Interpretacion de la prueba:**
+
+Muestra A: El p-value es 0.0095, el cual es menor al nivel de significancia que es 0.05. Por lo tanto, se rechaza la hipótesis de normalidad para la versión A.
+
+Muestra C: El p-value es 0.2335, sugiriendo que no hay evidencia para descartar la normalidad en esta muestra.
+
+Debido a que la versión A no cumple con el supuesto de normalidad, no es adecuado utilizar pruebas paramétricas.Realizamos ademas el gráfico Q-Q para reafirmar que se incumple este supuesto.
+
+```{r}
+ggqqplot(df_analisis, x = "tiempo", facet.by = "version",
+         color = "version", palette = c("#00AFBB", "#E7B800"),
+         title = "Gráfico Q-Q Tiempos de Ejecución")
+```
+
+Al incumplirse la normalidad, se utiliza la Prueba de Suma de Rangos de Wilcoxon (Mann-Whitney U) para comparar las distribuciones.
+
+Las nuevas Hipotesis adaptadas son:
+
+**H0:** Las distribuciones de los tiempos de ejecución de las versiones A y C son iguales (la diferencia de las medianas es cero).
+
+**HA:** Las distribuciones de los tiempos de ejecución difieren (la diferencia de las medianas no es cero).
+
+```{r}
+prueba_wilcox <- wilcox.test(tiempo ~ version, data = df_analisis, 
+                             alternative = "two.sided", exact = FALSE, conf.int = TRUE)
+print(prueba_wilcox)
+```
+
+Los resultados de la prueba de Wilcoxon arrojaron un estadístico W = 220 y un p-value = 0.9291.Dado que el valor p (0.9291) es considerablemente superior al nivel de significancia estandar de 0.05, no existe evidencia suficiente para rechazar la hipótesis nula.
+
+**Conclusion**: Se verificó que los datos no cumplen los supuestos necesarios para una prueba paramétrica, validando el uso de métodos no paramétricos.Ademas No se encontró evidencia estadísticamente significativa de una diferencia en los tiempos de ejecución entre las versiones A y C del algoritmo.
+Por lo tanto, los datos no respaldan la intuición de la memorista ya que no se puede afirmar que una versión sea más rápida o lenta que la otra para instancias de 60 o más nodos basándose en estas muestras.
+
+## Pregunta 2
+
+La memorista también sospecha que, al comparar las mismas instancias de iguales características, las mejores soluciones encontradas por las versiones A y B tienen rendimientos distintos. ¿Estará en lo cierto?  Para responder, filtren los datos para tener las instancias con 60 o más nodos y seleccionen las columnas con el mejor rendimiento de las versiones A y B en formato ancho. Usando como semilla el valor 33, obtengan una muestra aleatoria de 22 instancias. Realicen un análisis estadístico pertinente (enunciar hipótesis, revisar condiciones, seleccionar pruebas ómnibus y post-hoc según corresponda) para responder la pregunta planteada, utilizando pruebas no paramétricas de ser necesario.
+
+**H0**: La distribución del rendimiento de la versión A es igual a la distribución del rendimiento de la versión B (no hay diferencias).
+
+**HA**: La distribución del rendimiento de la versión A es diferente a la distribución del rendimiento de la versión B (hay diferencias).
+
+**Condiciones**: Para muestras pareadas, las diferencias deben ser simetricas. Se verifica normalidad y simetria de las diferencias.
+
+```{r, warning = FALSE, message = FALSE}
+
+datos_filtrados <- datos %>% filter(n.nodos >= 60)
+
+# Seleccionar columnas de mejor rendimiento A y B
+datos_ancho <- datos_filtrados %>% select(instancia, n.nodos, mejor.A, mejor.B)
+
+# muestra aleatoria de 22 instancias
+set.seed(33)
+muestra_indices <- sample(1:nrow(datos_ancho), size = 22, replace = FALSE)
+muestra <- datos_ancho[muestra_indices, ]
+
+# Calcular diferencias
+muestra <- muestra %>% mutate(diferencia = mejor.A - mejor.B)
+
+
+# Normalidad en las diferencias
+cat("\n PRUEBA DE NORMALIDAD \n")
+shapiro_resultado <- shapiro.test(muestra$diferencia)
+print(shapiro_resultado)
+
+# verificacion de simetria
+cat("\n VERIFICACION DE SIMETRIA \n")
+asimetria <- moments::skewness(muestra$diferencia)
+cat("Asimetria (skewness) =", round(asimetria, 3), "\n")
+
+# wilcoxon
+cat("\n PRUEBA DE WILCOXON (muestras pareadas)\n")
+wilcoxon_resultado <- wilcox.test(muestra$mejor.A, muestra$mejor.B, paired = TRUE, exact = FALSE)
+print(wilcoxon_resultado)
+
+
+```
+Como p value < α, se RECHAZA H0. Los datos respaldan la intuicion de la memorista: existe diferencia significativa entre los rendimientos de las versiones A y B. Nota: Se uso Wilcoxon porque las diferencias no siguen distribucion normal (p = 0.0103). El p-value de Wilcoxon es 7.47e-05.
+
+
+## Pregunta 3
+
+La memorista sospecha que hay diferencias significativas en el tiempo de ejecución entre las versiones del algoritmo cuando las instancias de prueba tienen 45 o más nodos. ¿Los datos respaldan la intuición de la memorista? Para responder, filtren los datos para tener las instancias con 45 o más nodos y seleccionen las columnas con los tiempos de ejecución registrados (en formato ancho). Usando como semilla el valor 43, obtengan muestras aleatorias independientes de 15, 15 y 14 tiempos registrados por las versiones A, B y C, respectivamente. Realicen un análisis estadístico pertinente (enunciar hipótesis, revisar condiciones, seleccionar pruebas ómnibus y post-hoc según corresponda) para responder la pregunta planteada, utilizando pruebas no paramétricas de ser necesario.
+
+
+**Hipótesis iniciales** (prueba paramétrica: ANOVA de una vía)
+
+**H0:** El tiempo de ejecución promedio es igual en las tres versiones del algoritmo para instancias con 45 o más nodos (μ_A = μ_B = μ_C).
+
+**HA:** Al menos una versión del algoritmo presenta un tiempo de ejecución promedio distinto a las demás.
+
+Preparación de los datos:
+
+```{r}
+#filtrar instancias con 45 o más nodos y seleccionar columnas de tiempo
+datos_45 <- datos %>% filter(n.nodos >= 45) %>%
+  select(instancia, tiempo.A, tiempo.B, tiempo.C)
+
+#muestras aleatorias independientes con semilla 43
+set.seed(43)
+muestra_A3 <- sample(datos_45$tiempo.A, size = 15, replace = FALSE)
+muestra_B3 <- sample(datos_45$tiempo.B, size = 15, replace = FALSE)
+muestra_C3 <- sample(datos_45$tiempo.C, size = 14, replace = FALSE)
+
+#formato largo para análisis
+df_p3 <- data.frame(
+  tiempo  = c(muestra_A3, muestra_B3, muestra_C3),
+  version = factor(c(rep("A", 15), rep("B", 15), rep("C", 14)))
+)
+```
+**Verificación de condiciones paramétricas**
+
+Para aplicar ANOVA de una vía se requiere: (1) escala de razón o intervalo, (2) independencia de las observaciones, (3) normalidad en cada grupo y (4) homocedasticidad.
+
+Los tiempos de ejecución en milisegundos constituyen una escala de razón (existe un cero absoluto), satisfaciendo la condición 1. Las muestras fueron obtenidas de forma aleatoria e independiente entre sí, satisfaciendo la condición 2. Las condiciones 3 y 4 se verifican a continuación.
+
+```{r}
+#prueba de normalidad de Shapiro-Wilk por grupo
+shapiro_A3 <- shapiro.test(muestra_A3)
+shapiro_B3 <- shapiro.test(muestra_B3)
+shapiro_C3 <- shapiro.test(muestra_C3)
+
+print(list(Shapiro_A = shapiro_A3,
+           Shapiro_B = shapiro_B3,
+           Shapiro_C = shapiro_C3))
+```
+
+```{r}
+#inspección visual de normalidad mediante gráficos Q-Q
+ggqqplot(df_p3, x = "tiempo", facet.by = "version",
+         color = "version", palette = c("#00AFBB", "#E7B800", "#FC4E07"),
+         title = "Gráfico Q-Q — Tiempos de ejecución por versión (≥45 nodos)")
+```
+
+La prueba de Shapiro-Wilk indica que la versión A (p < 0.05) y la versión B (p < 0.05) no siguen una distribución normal, mientras que la versión C no presenta evidencia en contra de la normalidad (p = 0.35). Dado que al menos dos grupos incumplen el supuesto de normalidad, no es válido aplicar ANOVA paramétrico. Por este motivo, no es necesario verificar homocedasticidad.
+
+**Selección de prueba no paramétrica**
+
+Al tratarse de tres muestras independientes cuya distribución no puede asumirse normal, la alternativa no paramétrica al ANOVA de una vía es la **prueba de Kruskal-Wallis**. Las condiciones requeridas son: (1) variable dependiente en escala ordinal o superior → ✓ (escala de razón), (2) muestras independientes entre sí → ✓, y (3) al menos 5 observaciones por grupo → ✓ (15, 15 y 14).
+
+**Hipótesis adaptadas** (prueba no paramétrica: Kruskal-Wallis)
+
+**H0:** La distribución del tiempo de ejecución es la misma en las tres versiones del algoritmo para instancias con 45 o más nodos.
+
+**HA:** Al menos una versión del algoritmo presenta una distribución del tiempo de ejecución distinta a las demás.
+
+```{r}
+#prueba ómnibus de Kruskal-Wallis
+kruskal_p3 <- kruskal.test(tiempo ~ version, data = df_p3)
+print(kruskal_p3)
+```
+
+```{r}
+#analisis post-hoc: comparaciones por pares con corrección de Holm
+posthoc_p3 <- pairwise.wilcox.test(df_p3$tiempo, df_p3$version,
+                                    p.adjust.method = "holm",
+                                    exact = FALSE)
+print(posthoc_p3)
+```
+
+**Conclusión:** Con un nivel de significancia α = 0.05, la prueba de Kruskal-Wallis entregó un p-value < 0.05, por lo que se rechaza la hipótesis nula. Existe evidencia suficiente para concluir que al menos una versión del algoritmo presenta una distribución del tiempo de ejecución significativamente diferente a las demás para instancias con 45 o más nodos. El análisis post-hoc de Wilcoxon con corrección de Holm permite identificar los pares de versiones que presentan diferencias significativas (p < 0.05). Por tanto, los datos respaldan la intuición de la memorista.
+
+---
+
+## Pregunta 4
+
+La memorista también sospecha que, al comparar las mismas instancias con iguales características, las mejores soluciones encontradas por las diferentes versiones del algoritmo tienen rendimientos distintos. ¿Estará en lo cierto?  Para responder, filtren los datos para tener las instancias con 45 o más nodos y seleccionen las columnas con los mejores rendimientos registrados. Usando como semilla el valor 71, obtengan una muestra aleatoria de 23 instancias. Realicen un análisis estadístico pertinente (enunciar hipótesis, revisar condiciones, seleccionar pruebas ómnibus y post-hoc según corresponda) para responder la pregunta planteada, utilizando pruebas no paramétricas de ser necesario.
+
+**Hipótesis iniciales** (prueba paramétrica: ANOVA de medidas repetidas)
+
+Las mismas instancias son evaluadas con las tres versiones del algoritmo, por lo que las observaciones están relacionadas (diseño de medidas repetidas).
+
+**H0:** El rendimiento promedio de la mejor solución es igual en las tres versiones del algoritmo para instancias con 45 o más nodos (μ_A = μ_B = μ_C).
+
+**HA:** Al menos una versión presenta un rendimiento promedio de la mejor solución distinto a las demás.
+
+Preparación de los datos:
+
+```{r}
+#filtrar instancias con 45 o más nodos y seleccionar columnas de rendimiento
+datos_45_rend <- datos %>% filter(n.nodos >= 45) %>%
+  select(instancia, mejor.A, mejor.B, mejor.C)
+
+#muestra aleatoria de 23 instancias con semilla 71
+set.seed(71)
+indices_p4 <- sample(1:nrow(datos_45_rend), size = 23, replace = FALSE)
+muestra_p4 <- datos_45_rend[indices_p4, ]
+
+#formato largo para análisis
+df_p4 <- muestra_p4 %>%
+  pivot_longer(cols = c(mejor.A, mejor.B, mejor.C),
+               names_to  = "version",
+               values_to = "rendimiento") %>%
+  mutate(version   = factor(version),
+         instancia = factor(instancia))
+```
+
+**Verificación de condiciones paramétricas**
+
+Para aplicar ANOVA de medidas repetidas se requiere: (1) escala de razón o intervalo, (2) observaciones relacionadas entre bloques, (3) normalidad en cada grupo y (4) esfericidad.
+
+El rendimiento está expresado en porcentaje de cercanía al óptimo, lo que constituye una escala de razón con cero absoluto, satisfaciendo la condición 1. Se comparan las mismas 23 instancias bajo cada versión, por lo que las observaciones son dependientes, satisfaciendo la condición 2. Las condiciones 3 y 4 se verifican a continuación.
+
+```{r}
+#prueba de normalidad de Shapiro-Wilk por versión
+shapiro_mA4 <- shapiro.test(muestra_p4$mejor.A)
+shapiro_mB4 <- shapiro.test(muestra_p4$mejor.B)
+shapiro_mC4 <- shapiro.test(muestra_p4$mejor.C)
+
+print(list(Shapiro_mejor.A = shapiro_mA4,
+           Shapiro_mejor.B = shapiro_mB4,
+           Shapiro_mejor.C = shapiro_mC4))
+```
+
+```{r}
+#inspección visual de normalidad mediante gráficos Q-Q
+ggqqplot(df_p4, x = "rendimiento", facet.by = "version",
+         color = "version", palette = c("#00AFBB", "#E7B800", "#FC4E07"),
+         title = "Gráfico Q-Q — Rendimiento por versión (≥45 nodos)")
+```
+
+La prueba de Shapiro-Wilk indica que la versión C no sigue una distribución normal (p < 0.05), mientras que las versiones A y B no presentan evidencia suficiente en contra de la normalidad. Dado que al menos un grupo incumple el supuesto de normalidad, no es válido aplicar ANOVA de medidas repetidas. Por este motivo, no es necesario verificar esfericidad.
+
+**Selección de prueba no paramétrica**
+
+Al tratarse de tres muestras relacionadas (mismas instancias medidas bajo cada versión) cuya distribución no puede asumirse normal, la alternativa no paramétrica al ANOVA de medidas repetidas es la **prueba de Friedman**. Las condiciones requeridas son: (1) variable dependiente en escala ordinal o superior → ✓ (escala de razón), (2) bloques de observaciones relacionadas → ✓ (misma instancia en cada versión), y (3) al menos 2 tratamientos y 5 bloques → ✓ (3 versiones, 23 instancias).
+
+**Hipótesis adaptadas** (prueba no paramétrica: Friedman)
+
+**H0:** La distribución del rendimiento de la mejor solución es la misma en las tres versiones del algoritmo para instancias con 45 o más nodos (los rangos medios son iguales entre versiones).
+
+**HA:** Al menos una versión presenta una distribución del rendimiento de la mejor solución distinta a las demás.
+
+```{r}
+#prueba ómnibus de Friedman
+friedman_p4 <- friedman.test(rendimiento ~ version | instancia, data = df_p4)
+print(friedman_p4)
+```
+
+```{r}
+#análisis post-hoc: comparaciones por pares de Wilcoxon pareado con
+#corrección de Holm para controlar la tasa de error familiar
+posthoc_p4 <- pairwise.wilcox.test(df_p4$rendimiento, df_p4$version,
+                                    paired          = TRUE,
+                                    p.adjust.method = "holm",
+                                    exact           = FALSE)
+print(posthoc_p4)
+```
+
+**Conclusión:** Con un nivel de significancia α = 0.05, la prueba de Friedman entregó un p-value < 0.05, por lo que se rechaza la hipótesis nula. Existe evidencia suficiente para concluir que al menos una versión del algoritmo presenta una distribución del rendimiento de la mejor solución significativamente diferente a las demás, al comparar las mismas instancias con 45 o más nodos. El análisis post-hoc de Wilcoxon pareado con corrección de Holm identifica los pares de versiones con diferencias significativas (p < 0.05 en la tabla anterior). Por tanto, los datos respaldan la intuición de la memorista.

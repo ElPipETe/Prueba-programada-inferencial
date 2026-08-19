@@ -1,0 +1,306 @@
+---
+title: ''
+author: "Equipo 9"
+date: "2026-08-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# Configuración global de los chunks
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.align = "center")
+```
+
+## Librerías
+
+```{r librerias}
+library(dplyr)
+library(ggplot2)
+library(caret)
+library(car)
+library(pROC)
+library(bestglm)
+library(tidyr)
+```
+
+## Carga y Preparación de los Datos
+
+Importamos el archivo `EP09 Datos.csv`. Luego, crearemos la variable **IMC** (Índice de Masa Corporal) y la variable dicotómica **EN** (Estado Nutricional), clasificando como "Sobrepeso" a quienes superen un IMC de 23.2.
+
+```{r preparacion_datos}
+# Carga de datos
+datos <- read.csv2("EP09 Datos.csv", stringsAsFactors = TRUE)
+
+# Cálculo del IMC (asumiendo que Height está en cm)
+datos <- datos %>%
+  mutate(IMC = Weight / ((Height / 100)^2),
+         EN = factor(ifelse(IMC >= 23.2, "Sobrepeso", "Normal"), 
+                     levels = c("Normal", "Sobrepeso")))
+table(datos$EN)
+```
+
+## 1. Selección de la Muestra (Hombres)
+
+Al ser un equipo impar, trabajaremos con hombres (`Gender == 1`). Seleccionaremos aleatoriamente 75 individuos con sobrepeso y 75 sin sobrepeso.
+
+```{r seleccion_muestra}
+set.seed(1234)
+
+datos_hombres <- datos %>% 
+  filter(Gender == 1) %>%
+  mutate(ID = row_number())
+
+# Muestreo de 75 por grupo
+hombres_sp <- datos_hombres %>% filter(EN == "Sobrepeso") %>% slice_sample(n = 75)
+hombres_nsp <- datos_hombres %>% filter(EN == "Normal") %>% slice_sample(n = 75)
+```
+
+### 1.1 División Entrenamiento / Prueba
+
+Dividimos las muestras 75/75 en dos conjuntos: 100 para entrenamiento (50 y 50) y 50 para prueba (25 y 25).
+
+```{r train_test_split}
+# Entrenamiento
+train_sp <- hombres_sp %>% slice_sample(n = 50)
+train_nsp <- hombres_nsp %>% slice_sample(n = 50)
+train_data <- bind_rows(train_sp, train_nsp)
+
+# Prueba (los que no quedaron en entrenamiento)
+test_sp <- hombres_sp %>% filter(!ID %in% train_sp$ID)
+test_nsp <- hombres_nsp %>% filter(!ID %in% train_nsp$ID)
+test_data <- bind_rows(test_sp, test_nsp)
+```
+
+## 2. Recordar variables predictoras seleccionadas en el EP09
+
+Las variables que se seleccionaron en el EP09 fueron:
+
+1. `Chest.depth`
+2. `Chest.diameter`
+3. `Knees.diameter`
+4. `Age`
+5. `Bicep.Girth`
+6. `Chest.Girth`
+7. `Biiliac.diameter`
+8. `Knee.Girth`
+
+```{r variables}
+variables = c("Chest.depth", "Chest.diameter", "Knees.diameter", "Age", "Bicep.Girth", "Chest.Girth", "Biiliac.diameter", "Knee.Girth")
+```
+
+## 3. Selección de variable
+
+Utilizaremos el grosor de la cintura (`Waist.Girth`) como único predictor, ya que es uno de los mejores estimadores antropométricos de adiposidad.
+
+## 4. Modelo 1: Regresión Logística Simple
+```{r modelo_1}
+modelo1 <- glm(EN ~ Waist.Girth, data = train_data, family = binomial(link = "logit"))
+summary(modelo1)
+```
+
+### 4.1 Visualización del Modelo 1
+
+Graficamos la probabilidad estimada de tener sobrepeso en función de la cintura, dibujando la curva logística sigmoide.
+
+```{r grafico_modelo_1, fig.height=4, fig.width=6}
+ggplot(train_data, aes(x = Waist.Girth, y = as.numeric(EN) - 1)) +
+  geom_point(alpha = 0.5, color = "darkgray") +
+  stat_smooth(method = "glm", method.args = list(family = "binomial"), se = FALSE, color = "blue") +
+  labs(title = "Curva Logística: Probabilidad de Sobrepeso",
+       x = "Grosor de Cintura (cm)",
+       y = "Probabilidad de Sobrepeso (0 = Normal, 1 = Sobrepeso)") +
+  theme_minimal()
+```
+
+## 5. Modelo 2: Regresión Logística Múltiple
+
+Construiremos un segundo modelo agregando más variables predictoras.
+
+```{r modelo_2}
+# Modelo mínimo: solo con Waist.Girth
+modelo_minimo <- modelo1
+
+# Modelo máximo: Waist.Girth + las 8 variables candidatas de la sección 2
+formula_maxima <- as.formula(paste("EN ~ Waist.Girth +", paste(variables, collapse = " + ")))
+modelo_maximo <- glm(formula_maxima, data = train_data, family = binomial(link = "logit"))
+
+
+modelo2 <- step(modelo_minimo,
+                 scope = list(lower = modelo_minimo, upper = modelo_maximo),
+                 direction = "both",
+                 trace = 1)
+
+
+summary(modelo2)
+```
+
+Como se puede apreciar en los resultados de la llamada a la función con `trace = 1`, no se encuentra un modelo que disminuya el AIC después de añadir la variable `Bicep.Girth`. Por lo tanto, se decide trabajar con ese resultado y no buscar otra variable para agregar, a pesar de que se solicite incorporar entre 2 y 5 variables adicionales (sin contar la variable seleccionada anteriormente).
+
+## 6. Confiabilidad y Generalidad de los Modelos
+
+### 6.1 Linealidad entre los predictores y la respuesta transformada (logit)
+
+```{r linealidad}
+# Para el modelo 1 (un solo predictor)
+residualPlots(modelo1, fitted = FALSE)
+
+# Para el modelo 2 (múltiples predictores)
+residualPlots(modelo2, fitted = FALSE)
+```
+
+**Conclusión:** en ambos modelos, la prueba de curvatura asociada a cada predictor no resulta significativa (Modelo 1: `Waist.Girth`, estadístico = 0.7181, p = 0.3968; Modelo 2: `Waist.Girth`, estadístico = 0.5048, p = 0.4774, y `Bicep.Girth`, estadístico = 0.0011, p = 0.9741). Como en ningún caso p < 0.05, no hay evidencia para rechazar el supuesto de linealidad entre cada predictor y el logit de la variable respuesta, por lo que esta condición se cumple satisfactoriamente en ambos modelos.
+
+### 6.2 Independencia de los residuos
+
+```{r independencia}
+durbinWatsonTest(modelo1)
+durbinWatsonTest(modelo2)
+```
+
+**Conclusión:** la prueba de Durbin-Watson resulta significativa en ambos modelos (Modelo 1: autocorrelación = 0.638, D-W = 0.704, p < 0.001; Modelo 2: autocorrelación = 0.546, D-W = 0.890, p < 0.001), lo que en principio indicaría una violación del supuesto de independencia. Sin embargo, esta prueba evalúa la correlación entre residuos *consecutivos según el orden de las filas* del data frame, y `train_data` se construyó concatenando primero todos los casos con EN "Sobrepeso" (`train_sp`) y luego todos los casos "Normal" (`train_nsp`), sin mezclar aleatoriamente el orden final. Esto genera bloques de observaciones consecutivas con residuos de signo similar, produciendo una autocorrelación aparente que es un artefacto del orden de los datos y no evidencia de una dependencia real entre observaciones, ya que cada individuo fue muestreado de forma independiente y no existe una secuencia temporal o espacial entre ellos.
+
+**Acción correctiva:** para confirmar que el problema es de orden y no de dependencia real, mezclamos aleatoriamente las filas de `train_data` antes de reevaluar la prueba:
+
+```{r independencia_corregida}
+# Mezclamos aleatoriamente el orden de las filas para eliminar el artefacto
+# de orden (Sobrepeso primero, Normal después) y re-evaluamos independencia
+set.seed(1234)
+train_data_shuffled <- train_data %>% slice_sample(prop = 1)
+
+modelo1_shuffled <- glm(EN ~ Waist.Girth, data = train_data_shuffled, family = binomial(link = "logit"))
+modelo2_shuffled <- glm(EN ~ Waist.Girth + Bicep.Girth, data = train_data_shuffled, family = binomial(link = "logit"))
+
+durbinWatsonTest(modelo1_shuffled)
+durbinWatsonTest(modelo2_shuffled)
+```
+
+**Conclusión:** Al mezclar aleatoriamente el orden de las filas, el estadístico de Durbin-Watson se acerca a 2 en ambos modelos y deja de ser significativo (Modelo 1: autocorrelación = 0.051, D-W = 1.880, p = 0.55; Modelo 2: autocorrelación = 0.094, D-W = 1.793, p = 0.252). Esto confirma que la autocorrelación detectada originalmente era un artefacto del orden en que se concatenaron los datos (todos los casos "Sobrepeso" primero y luego todos los "Normal"), y no evidencia de una dependencia real entre las observaciones. Por lo tanto, el supuesto de independencia de los residuos sí se cumple para ambos modelos.
+
+### 6.3 Multicolinealidad entre los predictores
+
+```{r multicolinealidad}
+# No aplica al modelo 1, ya que tiene un solo predictor
+vif(modelo2)
+```
+
+**Conclusión:** los valores de VIF para `Waist.Girth` y `Bicep.Girth` son iguales a 1, muy por debajo de los umbrales habituales de preocupación (5 o 10). Esto indica que no existe multicolinealidad relevante entre los predictores del Modelo 2, por lo que esta condición se cumple sin problemas.
+
+### 6.4 Información incompleta (observaciones suficientes por predictor)
+
+```{r informacion_incompleta}
+# Regla general: se recomiendan entre 10 y 15 observaciones por cada
+# predictor numérico. Como la muestra de entrenamiento está balanceada
+# (50 casos "Sobrepeso" y 50 "Normal"), se puede usar el mínimo de esos
+# dos grupos como referencia (EPV: events per variable)
+
+n_min_grupo <- min(table(train_data$EN))
+
+n_predictores_modelo1 <- length(coef(modelo1)) - 1  # sin el intercepto
+n_predictores_modelo2 <- length(coef(modelo2)) - 1
+
+epv_modelo1 <- n_min_grupo / n_predictores_modelo1
+epv_modelo2 <- n_min_grupo / n_predictores_modelo2
+
+epv_modelo1
+epv_modelo2
+```
+
+**Conclusión:** el Modelo 1 tiene 50 observaciones del grupo minoritario por cada predictor (EPV = 50) y el Modelo 2 tiene 25 (EPV = 25). Ambos valores superan ampliamente el mínimo recomendado de 10 a 15 observaciones por predictor, por lo que no hay riesgo de información incompleta en ninguno de los dos modelos.
+
+### 6.5 Separación perfecta
+
+```{r separacion_perfecta}
+# Indicador cuantitativo: si el modelo genera probabilidades ajustadas muy
+# cercanas a 0 o 1 (o errores estándar de los coeficientes anormalmente
+# grandes), es señal de posible separación perfecta o cuasi-perfecta
+
+summary(modelo1)$coefficients
+summary(modelo2)$coefficients
+
+any(fitted(modelo1) < 1e-4 | fitted(modelo1) > 1 - 1e-4)
+any(fitted(modelo2) < 1e-4 | fitted(modelo2) > 1 - 1e-4)
+
+# Indicador visual: para cada predictor del modelo 2 (incluyendo Waist.Girth),
+# se revisa si existe superposición entre las distribuciones de ambas clases
+predictores_modelo2 <- names(coef(modelo2))[-1]
+
+train_data %>%
+  select(EN, all_of(predictores_modelo2)) %>%
+  tidyr::pivot_longer(cols = all_of(predictores_modelo2),
+                       names_to = "predictor", values_to = "valor") %>%
+  ggplot(aes(x = EN, y = valor, fill = EN)) +
+  geom_boxplot(alpha = 0.6) +
+  facet_wrap(~ predictor, scales = "free_y") +
+  theme_minimal() +
+  labs(title = "Distribución de cada predictor del Modelo 2 según EN",
+       x = "Estado Nutricional", y = "Valor del predictor")
+```
+
+**Conclusión:** los errores estándar de los coeficientes de ambos modelos son de una magnitud razonable (no se observan valores anormalmente inflados, que es la señal típica de separación perfecta o cuasi-perfecta), y ninguna probabilidad ajustada por los modelos se acerca a 0 o a 1 (`any(...)` devuelve `FALSE` en ambos casos). Los diagramas de cajas también muestran superposición entre las distribuciones de `Waist.Girth` y `Bicep.Girth` para los grupos "Normal" y "Sobrepeso", sin una frontera que separe completamente ambas clases. En conjunto, no hay evidencia de separación perfecta en ninguno de los dos modelos.
+
+### 6.6 Casos sobreinfluyentes
+
+```{r sobreinfluyentes}
+influencePlot(modelo1)
+influencePlot(modelo2)
+```
+
+**Conclusión:** en el Modelo 1, los casos 18 y 40 presentan una distancia de Cook despreciable (≈ 0.0025 y 0.0022), pero los casos 51 (residuo estudentizado = -6.11, D de Cook = 0.295) y 69 (residuo estudentizado = -3.32, D de Cook = 0.136) superan claramente el umbral de referencia 4/n = 4/100 = 0.04, destacándose como los casos más influyentes, en especial el caso 51. En el Modelo 2, los casos 9 (D de Cook = 0.182) y 51 (D de Cook = 0.229) también superan ese umbral, mientras que el caso 11 tiene una D de Cook baja (0.019) pero un leverage (Hat) relativamente alto (0.108). Ninguna de estas distancias de Cook alcanza el umbral clásico de preocupación severa (D de Cook ≈ 1), por lo que ningún caso domina completamente las estimaciones de los coeficientes. Sin embargo, el caso 51 se repite como influyente en ambos modelos, por lo que se recomienda revisar sus valores originales (posibles errores de medición) y, como verificación adicional, reajustar los modelos excluyéndolo para confirmar que los coeficientes no cambian sustancialmente.
+
+### 6.7 Resumen de confiabilidad y generalidad
+
+En términos generales, tanto el Modelo 1 como el Modelo 2 cumplen razonablemente bien las condiciones necesarias para la regresión logística: existe linealidad entre los predictores y el logit, no hay multicolinealidad relevante, se cuenta con observaciones más que suficientes por predictor, y no hay evidencia de separación perfecta. La señal de dependencia detectada por la prueba de Durbin-Watson se explica por el orden en que se concatenaron los datos y no por una dependencia real entre observaciones. El único punto que amerita atención es la presencia de un pequeño número de casos (particularmente el caso 51) con mayor influencia relativa sobre las estimaciones, aunque sin llegar a dominar los modelos.
+
+## 7. Poder Predictivo de los Modelos
+
+Evaluamos la capacidad predictiva de ambos modelos, tanto en los datos usados para construirlos (entrenamiento) como en los datos no usados en su construcción (prueba), utilizando sensibilidad y especificidad como métricas. Consideramos "Sobrepeso" como la clase positiva.
+
+```{r poder_predictivo}
+# Función auxiliar para no repetir código: obtiene las predicciones de clase
+# de un modelo sobre un conjunto de datos, usando el umbral estándar de 0.5
+predecir_clase <- function(modelo, datos) {
+  probabilidades <- predict(modelo, newdata = datos, type = "response")
+  clases <- factor(ifelse(probabilidades > 0.5, "Sobrepeso", "Normal"),
+                    levels = c("Normal", "Sobrepeso"))
+  return(clases)
+}
+
+# --- Modelo 1: datos de entrenamiento ---
+pred_modelo1_train <- predecir_clase(modelo1, train_data)
+matriz_modelo1_train <- confusionMatrix(pred_modelo1_train, train_data$EN, positive = "Sobrepeso")
+matriz_modelo1_train
+
+# --- Modelo 1: datos de prueba ---
+pred_modelo1_test <- predecir_clase(modelo1, test_data)
+matriz_modelo1_test <- confusionMatrix(pred_modelo1_test, test_data$EN, positive = "Sobrepeso")
+matriz_modelo1_test
+
+# --- Modelo 2: datos de entrenamiento ---
+pred_modelo2_train <- predecir_clase(modelo2, train_data)
+matriz_modelo2_train <- confusionMatrix(pred_modelo2_train, train_data$EN, positive = "Sobrepeso")
+matriz_modelo2_train
+
+# --- Modelo 2: datos de prueba ---
+pred_modelo2_test <- predecir_clase(modelo2, test_data)
+matriz_modelo2_test <- confusionMatrix(pred_modelo2_test, test_data$EN, positive = "Sobrepeso")
+matriz_modelo2_test
+
+# Resumen comparativo de sensibilidad y especificidad
+resumen_predictivo <- data.frame(
+  Modelo = c("Modelo 1 (train)", "Modelo 1 (test)", "Modelo 2 (train)", "Modelo 2 (test)"),
+  Sensibilidad = c(matriz_modelo1_train$byClass["Sensitivity"],
+                    matriz_modelo1_test$byClass["Sensitivity"],
+                    matriz_modelo2_train$byClass["Sensitivity"],
+                    matriz_modelo2_test$byClass["Sensitivity"]),
+  Especificidad = c(matriz_modelo1_train$byClass["Specificity"],
+                     matriz_modelo1_test$byClass["Specificity"],
+                     matriz_modelo2_train$byClass["Specificity"],
+                     matriz_modelo2_test$byClass["Specificity"])
+)
+resumen_predictivo
+```
+
+**Conclusión:** El Modelo 2 (RLogitM, con `Waist.Girth` y `Bicep.Girth`) tiene mejor desempeño que el Modelo 1 (RLogitS) tanto en entrenamiento como en prueba: su exactitud balanceada es de 0.86 en ambos conjuntos, frente a 0.81 (train) y 0.78 (test) del Modelo 1. Además, el desempeño del Modelo 2 es prácticamente idéntico entre entrenamiento y prueba (0.86 y 0.86 de exactitud balanceada), lo que indica una buena generalización y ausencia de sobreajuste. El Modelo 1 muestra una caída algo mayor entre entrenamiento y prueba (0.81 → 0.78), aunque la diferencia es pequeña y no alarmante dado el tamaño de la muestra de prueba (50 casos). En ambos modelos, sensibilidad y especificidad están relativamente balanceadas entre sí, sin un sesgo marcado hacia una clase en particular
+
+## 8. Conclusión General
+
+Ambos modelos cumplen adecuadamente las condiciones necesarias para la regresión logística (linealidad, independencia, ausencia de multicolinealidad y de separación perfecta, y suficientes observaciones por predictor), y no están dominados por casos sobreinfluyentes, aunque el caso 51 mostró mayor influencia relativa en ambos modelos y podría revisarse puntualmente. En cuanto al poder predictivo, agregar `Bicep.Girth` al modelo simple sí produjo una mejora notoria y consistente: el Modelo 2 superó al Modelo 1 en exactitud balanceada tanto en entrenamiento (0.86 vs. 0.81) como en prueba (0.86 vs. 0.78), y mantuvo un desempeño estable entre ambos conjuntos, lo que sugiere que generaliza bien a datos no vistos. En base a esto, el Modelo 2 es la mejor opción para predecir el estado nutricional a partir de las variables antropométricas consideradas, sin señales de sobreajuste pese a incorporar una variable adicional.

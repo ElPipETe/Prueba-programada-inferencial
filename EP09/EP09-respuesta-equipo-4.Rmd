@@ -1,0 +1,842 @@
+---
+title: "EP09-Estadistica"
+author: "Equipo 4"
+date: "29-07-2026"
+output:
+  html_document:
+    toc: true # Activa la tabla de contenidos (índice)
+    toc_float: true # Permite que el índice se mueva al hacer scroll
+    toc_depth: 3 # Define la cantidad de niveles de títulos
+    theme: flatly # Tema visual (bootstrap)
+    highlight: pygments # Define el estilo del código (colores)
+    df_print: paged # Hace paginado al mostrar data frames
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, # Muestra código R en el documento
+  # warning   = FALSE, # Oculta advertencias
+  message = FALSE, # Oculta mensajes (como los de carga de paquetes)
+  fig.align = "center", # Centra imágenes
+  fig.width = 7,
+  fig.height = 4 # Parámetros para el tamaño de gráficas
+)
+```
+
+
+# Contexto
+
+Un estudio recolectó medidas anatómicas de 247 hombres y 260 mujeres (Heinz et al., 2003).
+El estudio incluyó nueve mediciones del esqueleto (ocho diámetros y una profundidad de hueso a hueso) y doce mediciones de grosor (circunferencias) que incluyen el tejido.
+
+# Preguntas
+
+1. Definir la semilla a utilizar, que corresponde a los últimos cuatro dígitos del RUN (sin considerar el dígito verificador) del integrante de menor edad del equipo.
+2. Seleccionar una muestra aleatoria de 100 mujeres (si la semilla es un número par) o 100 hombres (si la semilla es impar), y separar 70 casos para trabajar en la construcción de modelos y 30 para su evaluación en datos no vistos.
+3. Seleccionar de forma aleatoria ocho posibles variables predictoras.
+4. Seleccionar, de las otras variables, una que el equipo considere que podría ser útil para predecir la variable Peso (sin considerar la estatura), justificando bien esta selección.
+5. Usando el entorno R y paquetes estándares, construir un modelo de regresión lineal simple con el predictor seleccionado en el paso anterior.
+6. Usando herramientas estándares del entorno R, buscar entre dos y cinco predictores de entre las variables seleccionadas al azar en el punto 3, para agregar al modelo de regresión lineal simple obtenido en el paso 5.
+7. Evaluar la bondad de ajuste (incluyendo el análisis de casos atípicos y casos influyentes) y la generalidad (condiciones para RLM) de los modelos y “arreglarlos” en caso de que presenten algún problema.
+8. Evaluar el poder predictivo del modelo con los datos no utilizados para construirlo.
+
+# Parte 1
+
+Se define la semilla con los últimos cuatro dígitos del rut del menor integrante:
+```{r}
+library(dplyr)
+datos <- read.csv2("EP09 Datos.csv")
+set.seed(8611)
+```
+# Parte 2
+
+Debido a que 8611 es impar, se debe trabajar con una selección aleatoria de 100 hombres (Gender == 1), y se separan 70 para construcción y 30 para evaluación.
+```{r}
+hombres <- datos[datos$Gender == 1, ]
+
+indices_muestra <- sample(
+  seq_len(nrow(hombres)),
+  size = 100,
+  replace = FALSE
+)
+muestra <- hombres[indices_muestra, ]
+
+indices_modelado <- sample(
+  seq_len(nrow(muestra)),
+  size = 70,
+  replace = FALSE
+)
+
+datos_modelado <- muestra[indices_modelado, ]
+datos_evaluacion <- muestra[-indices_modelado, ]
+
+cat("Cantidad de hombres disponibles:", nrow(hombres), "\n")
+cat("Tamaño de la muestra:", nrow(muestra), "\n")
+cat("Casos para modelado:", nrow(datos_modelado), "\n")
+cat("Casos para evaluación:", nrow(datos_evaluacion), "\n\n")
+```
+# Parte 3
+
+Se selecciona de forma aleatoria ocho posibles variables predictoras, no tomando en cuenta el peso, altura o género
+```{r}
+posibles_predictoras <- setdiff(
+  names(datos),
+  c("Weight", "Height", "Gender")
+)
+
+predictoras_azar <- sample(
+  posibles_predictoras,
+  size = 8,
+  replace = FALSE
+)
+
+cat("Ocho predictoras seleccionadas al azar:\n")
+print(predictoras_azar)
+```
+
+# Parte 4
+
+El paso 4 pide seleccionar como equipo, una variable que justificadamente sea útil para predecir el peso. Hemos definido como predictor el grosor a la altura de la cintura en cm (Waist.Girth) dado que es uno de los que tiene mayor coeficiente de correlación R respecto al peso y por su relación con el tamaño corporal en hombres.
+
+```{r}
+matriz_cor <- cor(muestra)
+matriz_cor[, "Weight"]
+```
+
+# Parte 5
+
+Para construir el modelo de regresión lineal simple se utilizó Waist.Girth como predictor del peso. El modelo se ajustó con los 70 hombres reservados para la construcción de los modelos, dejando los otros 30 casos para evaluar posteriormente su capacidad predictiva.
+
+```{r}
+modelo <- lm(Weight ~ Waist.Girth, data = datos_modelado)
+print(summary(modelo))
+```
+
+# Parte 6
+
+Se buscan entre 2 y 5 predictores adicionales de entre las 8 variables seleccionadas al azar en el punto 3, para agregar al modelo de regresión lineal simple obtenido en el paso 5. Para ello se utiliza selección hacia adelante (forward) con la función `add1()` del paquete `stats`, agregando predictores uno a uno según el criterio AIC.
+
+```{r}
+# Modelo base: el obtenido en el paso 5, pero usando datos_modelado
+# (70 casos para construcción del modelo)
+modelo_base <- lm(Weight ~ Waist.Girth, data = datos_modelado)
+cat("=== Modelo base (RLS del paso 5) ===\n")
+print(summary(modelo_base))
+
+# Fórmula completa: modelo base + todas las 8 variables al azar
+formula_completa <- as.formula(
+  paste("Weight ~ Waist.Girth +", paste(predictoras_azar, collapse = " + "))
+)
+cat("\nFórmula del modelo completo (scope):\n")
+print(formula_completa)
+```
+
+```{r}
+# Selección forward paso a paso usando add1() y el criterio AIC
+# Se agregan predictores uno a uno, evaluando cuál reduce más el AIC
+
+modelo_actual <- modelo_base
+predictores_disponibles <- predictoras_azar
+predictores_agregados <- c()
+
+cat("=== Selección Forward ===\n\n")
+cat("AIC modelo base:", AIC(modelo_actual), "\n\n")
+
+# Se iteran hasta 5 pasos (máximo 5 predictores a agregar)
+for (i in 1:5) {
+  # Evaluar la adición de cada predictor disponible
+  scope_formula <- as.formula(
+    paste("~ . +", paste(predictores_disponibles, collapse = " + "))
+  )
+
+  resultado_add1 <- add1(modelo_actual, scope = scope_formula, test = "F")
+  cat(paste("--- Paso", i, "---\n"))
+  print(resultado_add1)
+  cat("\n")
+
+  # Identificar el mejor predictor (menor AIC, excluyendo <none>)
+  candidatos <- resultado_add1[-1, , drop = FALSE] # Excluir fila <none>
+
+  if (nrow(candidatos) == 0) {
+    cat("No quedan predictores disponibles.\n")
+    break
+  }
+
+  mejor_idx <- which.min(candidatos$AIC)
+  mejor_predictor <- rownames(candidatos)[mejor_idx]
+  mejor_aic <- candidatos$AIC[mejor_idx]
+  aic_actual <- resultado_add1["<none>", "AIC"]
+  p_valor <- candidatos[mejor_idx, "Pr(>F)"]
+
+  # Criterio de parada: el predictor debe ser significativo (p < 0.05)
+  # y mejorar el AIC
+  if (is.na(p_valor) || p_valor >= 0.05) {
+    cat(paste(
+      "Mejor candidato:", mejor_predictor,
+      "con p =", round(p_valor, 4),
+      "-> No es significativo. Se detiene la selección.\n\n"
+    ))
+    break
+  }
+
+  if (mejor_aic >= aic_actual) {
+    cat(paste(
+      "Mejor candidato:", mejor_predictor,
+      "con AIC =", round(mejor_aic, 2),
+      ">= AIC actual =", round(aic_actual, 2),
+      "-> No mejora. Se detiene la selección.\n\n"
+    ))
+    break
+  }
+
+  # Agregar el predictor
+  cat(paste(
+    "Se agrega:", mejor_predictor,
+    "(AIC:", round(mejor_aic, 2),
+    ", p =", round(p_valor, 4), ")\n\n"
+  ))
+
+  predictores_agregados <- c(predictores_agregados, mejor_predictor)
+  predictores_disponibles <- setdiff(predictores_disponibles, mejor_predictor)
+
+  # Actualizar el modelo
+  formula_nueva <- as.formula(
+    paste("Weight ~ Waist.Girth +", paste(predictores_agregados, collapse = " + "))
+  )
+  modelo_actual <- lm(formula_nueva, data = datos_modelado)
+}
+
+# Verificar que se hayan agregado al menos 2 predictores
+if (length(predictores_agregados) < 2) {
+  cat("NOTA: Se agregaron menos de 2 predictores con el criterio de significancia.\n")
+  cat("Se forzará la inclusión de los 2 mejores predictores según AIC.\n\n")
+
+  # Reiniciar y forzar la selección de al menos 2
+  modelo_actual <- modelo_base
+  predictores_disponibles <- predictoras_azar
+  predictores_agregados <- c()
+
+  for (i in 1:2) {
+    scope_formula <- as.formula(
+      paste("~ . +", paste(predictores_disponibles, collapse = " + "))
+    )
+    resultado_add1 <- add1(modelo_actual, scope = scope_formula, test = "F")
+    candidatos <- resultado_add1[-1, , drop = FALSE]
+    mejor_idx <- which.min(candidatos$AIC)
+    mejor_predictor <- rownames(candidatos)[mejor_idx]
+
+    predictores_agregados <- c(predictores_agregados, mejor_predictor)
+    predictores_disponibles <- setdiff(predictores_disponibles, mejor_predictor)
+
+    formula_nueva <- as.formula(
+      paste("Weight ~ Waist.Girth +", paste(predictores_agregados, collapse = " + "))
+    )
+    modelo_actual <- lm(formula_nueva, data = datos_modelado)
+  }
+}
+
+cat("=== Modelo RLM Final (Parte 6) ===\n")
+cat("Predictores agregados:", paste(predictores_agregados, collapse = ", "), "\n\n")
+modelo_rlm <- modelo_actual
+print(summary(modelo_rlm))
+cat("\nAIC modelo base:", AIC(modelo_base), "\n")
+cat("AIC modelo RLM:", AIC(modelo_rlm), "\n")
+```
+
+# Parte 7
+
+## 7.1 Bondad de ajuste del modelo RLS
+
+La pauta pide evaluar la bondad de ajuste tanto del modelo de RLS como del modelo de RLM, por lo que antes de revisar el modelo múltiple se analiza el modelo simple obtenido en la parte 5.
+
+```{r}
+# Casos atípicos del modelo RLS
+residuos_est_rls <- rstandard(modelo_base)
+
+cat("=== Casos atípicos del RLS (|residuo estandarizado| > 3) ===\n")
+atipicos_rls <- which(abs(residuos_est_rls) > 3)
+if (length(atipicos_rls) > 0) {
+  cat("Se encontraron", length(atipicos_rls), "caso(s) atípico(s):\n")
+  for (idx in atipicos_rls) {
+    cat("  Fila", idx, "- Residuo estandarizado:", round(residuos_est_rls[idx], 3), "\n")
+  }
+} else {
+  cat("No se encontraron casos atípicos.\n")
+}
+
+# Casos influyentes del modelo RLS (distancia de Cook)
+n_rls <- nrow(datos_modelado)
+k_rls <- length(coef(modelo_base)) - 1 # 1 predictor
+umbral_cook_rls <- 4 / (n_rls - k_rls - 1)
+
+cat("\n=== Casos influyentes del RLS (Distancia de Cook) ===\n")
+cat("Umbral:", round(umbral_cook_rls, 4), "\n\n")
+
+dist_cook_rls <- cooks.distance(modelo_base)
+influyentes_rls <- which(dist_cook_rls > umbral_cook_rls)
+if (length(influyentes_rls) > 0) {
+  cat("Se encontraron", length(influyentes_rls), "caso(s) influyente(s):\n")
+  for (idx in influyentes_rls) {
+    cat("  Fila", idx, "- Distancia de Cook:", round(dist_cook_rls[idx], 4), "\n")
+  }
+} else {
+  cat("No se encontraron casos influyentes.\n")
+}
+```
+
+## 7.2 Bondad de ajuste del modelo RLM
+
+Se evalúa la bondad de ajuste del modelo de regresión lineal múltiple obtenido en la parte 6, incluyendo el análisis de casos atípicos e influyentes.
+
+```{r}
+cat("=== Resumen del modelo RLM ===\n")
+print(summary(modelo_rlm))
+cat("\n")
+cat("R² ajustado:", summary(modelo_rlm)$adj.r.squared, "\n")
+cat("AIC:", AIC(modelo_rlm), "\n")
+cat("BIC:", BIC(modelo_rlm), "\n")
+```
+
+### Análisis de casos atípicos
+
+Se identifican casos atípicos mediante los residuos estandarizados. Se consideran atípicos aquellos casos con residuos estandarizados con valor absoluto mayor a 3.
+
+```{r}
+# Residuos estandarizados
+residuos_est <- rstandard(modelo_rlm)
+
+cat("=== Casos atípicos (|residuo estandarizado| > 3) ===\n")
+atipicos <- which(abs(residuos_est) > 3)
+if (length(atipicos) > 0) {
+  cat("Se encontraron", length(atipicos), "caso(s) atípico(s):\n")
+  for (idx in atipicos) {
+    cat("  Fila", idx, "- Residuo estandarizado:", round(residuos_est[idx], 3), "\n")
+  }
+} else {
+  cat("No se encontraron casos atípicos.\n")
+}
+```
+
+### Análisis de casos influyentes
+
+Se identifican casos influyentes mediante la distancia de Cook. Un caso se considera influyente si su distancia de Cook supera el umbral $\frac{4}{n - k - 1}$, donde $n$ es el número de observaciones y $k$ el número de predictores, Fox, John. (1991).
+
+```{r}
+# Distancia de Cook
+dist_cook <- cooks.distance(modelo_rlm)
+n <- nrow(datos_modelado)
+k <- length(coef(modelo_rlm)) - 1 # Número de predictores (sin intercepto)
+umbral_cook <- 4 / (n - k - 1)
+
+cat("=== Casos influyentes (Distancia de Cook) ===\n")
+cat("Umbral:", round(umbral_cook, 4), "\n\n")
+
+influyentes <- which(dist_cook > umbral_cook)
+if (length(influyentes) > 0) {
+  cat("Se encontraron", length(influyentes), "caso(s) influyente(s):\n")
+  for (idx in influyentes) {
+    cat("  Fila", idx, "- Distancia de Cook:", round(dist_cook[idx], 4), "\n")
+  }
+} else {
+  cat("No se encontraron casos influyentes.\n")
+}
+
+# Gráfico de distancia de Cook
+plot(dist_cook,
+  type = "h", main = "Distancia de Cook",
+  ylab = "Distancia de Cook", xlab = "Observación",
+  col = ifelse(dist_cook > umbral_cook, "red", "steelblue"), lwd = 2
+)
+abline(h = umbral_cook, col = "red", lty = 2)
+legend("topright",
+  legend = paste("Umbral =", round(umbral_cook, 4)),
+  col = "red", lty = 2
+)
+
+```
+
+### Leverage (Apalancamiento)
+
+Se evalúan los valores hat (leverage) para detectar observaciones con alto apalancamiento. El umbral se define como $\frac{2(k+1)}{n}$, Hoaglin, David C., y Welsch, Roy E. (1978).
+
+```{r}
+hat_values <- hatvalues(modelo_rlm)
+umbral_hat <- 2 * (k + 1) / n
+
+cat("=== Casos con alto apalancamiento ===\n")
+cat("Umbral leverage:", round(umbral_hat, 4), "\n\n")
+
+alto_leverage <- which(hat_values > umbral_hat)
+if (length(alto_leverage) > 0) {
+  cat(
+    "Se encontraron", length(alto_leverage),
+    "caso(s) con alto apalancamiento:\n"
+  )
+  for (idx in alto_leverage) {
+    cat("  Fila", idx, "- Leverage:", round(hat_values[idx], 4), "\n")
+  }
+} else {
+  cat("No se encontraron casos con alto apalancamiento.\n")
+}
+```
+
+## 7.3 Condiciones para Regresión Lineal Simple (RLS)
+
+La pauta también pide evaluar la generalidad (condiciones) del modelo de RLS, no solo del RLM. Como el modelo simple tiene un único predictor, no aplica la condición de multicolinealidad.
+
+```{r}
+library(car)
+
+# Linealidad
+residualPlots(modelo_base, fitted = TRUE)
+
+# Independencia
+cat("=== Test de Durbin-Watson (RLS) ===\n")
+dw_test_rls <- durbinWatsonTest(modelo_base)
+print(dw_test_rls)
+cat(
+  "\nConclusión:", ifelse(dw_test_rls$p > 0.05,
+    "No se rechaza H0, los residuos son independientes",
+    "Se rechaza H0, existe autocorrelación en los residuos"
+  ),
+  "(p =", round(dw_test_rls$p, 4), ")\n\n"
+)
+
+# Normalidad
+cat("=== Test de Shapiro-Wilk (RLS) ===\n")
+shapiro_test_rls <- shapiro.test(residuals(modelo_base))
+print(shapiro_test_rls)
+cat(
+  "\nConclusión:", ifelse(shapiro_test_rls$p.value > 0.05,
+    "No se rechaza H0, los residuos siguen una distribución normal",
+    "Se rechaza H0, los residuos NO siguen una distribución normal"
+  ),
+  "(p =", round(shapiro_test_rls$p.value, 4), ")\n\n"
+)
+
+# Homocedasticidad
+cat("=== Test de homocedasticidad (ncvTest, RLS) ===\n")
+ncv_test_rls <- ncvTest(modelo_base)
+print(ncv_test_rls)
+cat(
+  "\nConclusión:", ifelse(ncv_test_rls$p > 0.05,
+    "No se rechaza H0, hay homocedasticidad",
+    "Se rechaza H0, hay heterocedasticidad"
+  ),
+  "(p =", round(ncv_test_rls$p, 4), ")\n\n"
+)
+```
+
+## 7.4 Condiciones para Regresión Lineal Múltiple (RLM)
+
+Se verifican las condiciones necesarias para que el modelo de RLM sea válido.
+
+### Condición 1: Linealidad de la relación
+
+Se verifica la linealidad global del modelo mediante el gráfico de residuos vs valores ajustados, y la linealidad por cada predictor mediante gráficos de residuos parciales (component + residual plots).
+
+```{r}
+library(car)
+residualPlots(
+  modelo_rlm,
+  terms = ~ Waist.Girth + Knee.Girth + Chest.Girth + Bitrochanteric.diameter,
+  fitted = TRUE
+)
+
+marginalModelPlots(
+  modelo_rlm,
+  terms = ~ Waist.Girth + Knee.Girth + Chest.Girth + Bitrochanteric.diameter
+)
+```
+
+### Condición 2: Independencia de los residuos
+
+Se utiliza el test de Durbin-Watson para evaluar la independencia de los residuos.
+
+```{r}
+library(car)
+cat("=== Test de Durbin-Watson ===\n")
+dw_test <- durbinWatsonTest(modelo_rlm)
+print(dw_test)
+
+if (dw_test$p > 0.05) {
+  cat(
+    "\nConclusión: No se rechaza H0, los residuos son independientes (p =",
+    round(dw_test$p, 4), ")\n"
+  )
+} else {
+  cat(
+    "\nConclusión: Se rechaza H0, existe autocorrelación en los residuos (p =",
+    round(dw_test$p, 4), ")\n"
+  )
+}
+```
+
+### Condición 3: Normalidad de los residuos
+
+Se evalúa la normalidad de los residuos mediante el test de Shapiro-Wilk y un Q-Q plot.
+
+```{r}
+cat("=== Test de Shapiro-Wilk para normalidad de los residuos ===\n")
+shapiro_test <- shapiro.test(residuals(modelo_rlm))
+print(shapiro_test)
+
+if (shapiro_test$p.value > 0.05) {
+  cat(
+    "\nConclusión: No se rechaza H0, los residuos siguen una distribución",
+    "normal (p =", round(shapiro_test$p.value, 4), ")\n"
+  )
+} else {
+  cat(
+    "\nConclusión: Se rechaza H0, los residuos NO siguen una distribución",
+    "normal (p =", round(shapiro_test$p.value, 4), ")\n"
+  )
+}
+
+# Q-Q plot
+plot(modelo_rlm, which = 2, main = "Q-Q Plot de los residuos")
+```
+
+### Condición 4: Homocedasticidad (varianza constante)
+
+Se evalúa la homocedasticidad con ncvTest.
+
+```{r}
+cat("=== Test de homocedasticidad (ncvTest) ===\n")
+ncv_test <- ncvTest(modelo_rlm)
+print(ncv_test)
+if (ncv_test$p > 0.05) {
+  cat(
+    "\nConclusión: No se rechaza H0, hay homocedasticidad (p =",
+    round(ncv_test$p, 4), ")\n"
+  )
+} else {
+  cat(
+    "\nConclusión: Se rechaza H0, hay heterocedasticidad (p =",
+    round(ncv_test$p, 4), ")\n"
+  )
+}
+```
+
+### Condición 5: Ausencia de multicolinealidad
+
+Se verifica la multicolinealidad entre los predictores mediante el Factor de Inflación de la Varianza (VIF). Valores de VIF mayores a 5 sugieren problemas de multicolinealidad.
+
+```{r}
+cat("=== Factor de Inflación de la Varianza (VIF) ===\n")
+vif_valores <- vif(modelo_rlm)
+print(vif_valores)
+
+if (any(vif_valores > 5)) {
+  cat(
+    "\n¡ADVERTENCIA! Los siguientes predictores presentan alta",
+    "multicolinealidad (VIF > 5):\n"
+  )
+  problematicos <- names(vif_valores[vif_valores > 5])
+  for (pred in problematicos) {
+    cat("  -", pred, ": VIF =", round(vif_valores[pred], 2), "\n")
+  }
+} else {
+  cat(
+    "\nNo se detectan problemas de multicolinealidad",
+    "(todos los VIF < 5).\n"
+  )
+}
+```
+
+## 7.5 Corrección del modelo
+
+Si se detectan problemas, se procede a corregir el modelo eliminando casos atípicos e influyentes problemáticos, y se reevalúan las condiciones.
+
+```{r}
+# Identificar casos a eliminar: atípicos e influyentes simultáneamente
+casos_problematicos <- union(atipicos, influyentes)
+
+cat("=== Casos problemáticos identificados ===\n")
+cat("Casos atípicos:", length(atipicos), "\n")
+cat("Casos influyentes:", length(influyentes), "\n")
+cat("Total de casos problemáticos (únicos):", length(casos_problematicos), "\n")
+
+# Verificar que no se elimina más del 10% de los datos
+porcentaje_eliminado <- length(casos_problematicos) / n * 100
+cat("Porcentaje de datos a eliminar:", round(porcentaje_eliminado, 1), "%\n\n")
+
+if (length(casos_problematicos) > 0 & porcentaje_eliminado <= 10) {
+  cat("Se procede a eliminar los casos problemáticos y reajustar el modelo.\n\n")
+
+  datos_limpios <- datos_modelado[-casos_problematicos, ]
+  cat("Observaciones originales:", n, "\n")
+  cat("Observaciones después de limpieza:", nrow(datos_limpios), "\n\n")
+
+  # Reajustar el modelo con los datos limpios
+  modelo_corregido <- update(modelo_rlm, data = datos_limpios)
+
+  cat("=== Modelo corregido ===\n")
+  print(summary(modelo_corregido))
+
+  cat("\n=== Comparación de modelos ===\n")
+  cat("R² ajustado original:", round(summary(modelo_rlm)$adj.r.squared, 4), "\n")
+  cat("R² ajustado corregido:", round(summary(modelo_corregido)$adj.r.squared, 4), "\n")
+  cat("AIC original:", round(AIC(modelo_rlm), 2), "\n")
+  cat("AIC corregido:", round(AIC(modelo_corregido), 2), "\n")
+} else if (porcentaje_eliminado > 10) {
+  cat("Se eliminaría más del 10% de los datos.\n")
+  cat("Se opta por eliminar solo los casos más extremos.\n\n")
+
+  # Eliminar solo los atípicos (residuo estandarizado > 3)
+  if (length(atipicos) > 0) {
+    datos_limpios <- datos_modelado[-atipicos, ]
+    modelo_corregido <- update(modelo_rlm, data = datos_limpios)
+
+    cat("=== Modelo corregido (solo atípicos eliminados) ===\n")
+    print(summary(modelo_corregido))
+  } else {
+    cat("No hay casos atípicos para eliminar. El modelo se mantiene.\n")
+    modelo_corregido <- modelo_rlm
+    datos_limpios <- datos_modelado
+  }
+} else {
+  cat("No se encontraron casos problemáticos. El modelo se mantiene.\n")
+  modelo_corregido <- modelo_rlm
+  datos_limpios <- datos_modelado
+}
+```
+
+### Reevaluación de condiciones del modelo corregido
+
+```{r}
+cat("=== Reevaluación de condiciones del modelo corregido ===\n\n")
+
+# Normalidad
+cat("--- Test de Shapiro-Wilk ---\n")
+shapiro_corr <- shapiro.test(residuals(modelo_corregido))
+print(shapiro_corr)
+cat(
+  "Conclusión:", ifelse(shapiro_corr$p.value > 0.05,
+    "Residuos normales", "Residuos NO normales"
+  ),
+  "(p =", round(shapiro_corr$p.value, 4), ")\n\n"
+)
+
+# Homocedasticidad
+cat("--- Test de homocedasticidad ---\n")
+ncv_corr <- ncvTest(modelo_corregido)
+print(ncv_corr)
+cat(
+  "Conclusión:", ifelse(ncv_corr$p > 0.05,
+    "Homocedasticidad", "Heterocedasticidad"
+  ),
+  "(p =", round(ncv_corr$p, 4), ")\n\n"
+)
+
+# Independencia
+cat("--- Test de Durbin-Watson ---\n")
+dw_corr <- durbinWatsonTest(modelo_corregido)
+print(dw_corr)
+cat(
+  "Conclusión:", ifelse(dw_corr$p > 0.05,
+    "Residuos independientes", "Autocorrelación detectada"
+  ),
+  "(p =", round(dw_corr$p, 4), ")\n\n"
+)
+
+# Multicolinealidad
+cat("--- VIF ---\n")
+vif_corr <- vif(modelo_corregido)
+print(vif_corr)
+cat("Conclusión:", ifelse(all(vif_corr < 5),
+  "Sin problemas de multicolinealidad",
+  "Problemas de multicolinealidad detectados"
+), "\n\n")
+
+# Gráficos diagnósticos del modelo corregido
+par(mfrow = c(2, 2))
+plot(modelo_corregido)
+par(mfrow = c(1, 1))
+```
+
+# Parte 8
+
+Para evaluar la calidad predictiva se utilizan los 30 hombres que no participaron en la construcción de los modelos.
+
+Siguiendo el capítulo 14 Jara, J. L., & Köhler, J. (s. f.), se calculan tres medidas:
+
+- **RMSE:** representa el tamaño típico de los errores de predicción, medido en kilogramos. Un valor menor es mejor.
+- **MAE:** corresponde al error promedio, sin considerar su signo, también medido en kilogramos. Un valor menor es mejor.
+- **R cuadrado:** muestra qué tan bien las predicciones reproducen las diferencias observadas en el peso. Un valor más cercano a 1 es mejor.
+
+Se comparará el modelo de regresión lineal simple con el modelo de regresión lineal múltiple.
+
+```{r}
+# Se mantiene el modelo RLM original porque la eliminación de los
+# casos influyentes no se encuentra suficientemente justificada.
+
+modelo_final <- modelo_rlm
+
+# Predicciones del modelo lineal simple
+predicciones_rls <- predict(
+  modelo_base,
+  newdata = datos_evaluacion
+)
+
+# Predicciones del modelo lineal múltiple
+predicciones_rlm <- predict(
+  modelo_final,
+  newdata = datos_evaluacion
+)
+```
+
+Se crea una función para calcular las medidas usadas para evaluar las predicciones.
+
+```{r}
+# Función para evaluar las predicciones
+evaluar_predicciones <- function(observado, predicho) {
+
+  errores <- observado - predicho
+
+  data.frame(
+    RMSE = sqrt(
+      mean(errores^2)
+    ),
+
+    Rsquared = cor(
+      observado,
+      predicho
+    )^2,
+
+    MAE = mean(
+      abs(errores)
+    )
+  )
+}
+```
+
+Se calculan las medidas para ambos modelos utilizando exactamente los mismos 30 casos.
+
+```{r}
+# Resultados del RLS
+metricas_rls <- evaluar_predicciones(
+  observado = datos_evaluacion$Weight,
+  predicho = predicciones_rls
+)
+
+# Resultados del RLM
+metricas_rlm <- evaluar_predicciones(
+  observado = datos_evaluacion$Weight,
+  predicho = predicciones_rlm
+)
+
+# Tabla comparativa
+comparacion_predictiva <- rbind(
+  RLS = metricas_rls,
+  RLM = metricas_rlm
+)
+
+comparacion_predictiva <- round(
+  comparacion_predictiva,
+  digits = 3
+)
+
+print(comparacion_predictiva)
+```
+
+También se muestra el peso real, el peso predicho por el RLM y el error cometido en cada uno de los 30 casos.
+
+```{r}
+resultados_evaluacion <- data.frame(
+  Peso_observado = datos_evaluacion$Weight,
+  Peso_predicho = predicciones_rlm,
+  Error = datos_evaluacion$Weight -
+    predicciones_rlm
+)
+
+resultados_evaluacion$Peso_predicho <- round(
+  resultados_evaluacion$Peso_predicho,
+  2
+)
+
+resultados_evaluacion$Error <- round(
+  resultados_evaluacion$Error,
+  2
+)
+
+print(resultados_evaluacion)
+```
+
+El siguiente gráfico permite comparar los pesos reales y predichos. Los puntos cercanos a la línea diagonal representan predicciones más acertadas.
+
+```{r}
+plot(
+  datos_evaluacion$Weight,
+  predicciones_rlm,
+  xlab = "Peso observado (kg)",
+  ylab = "Peso predicho (kg)",
+  main = "Predicciones del RLM en datos no vistos",
+  pch = 19
+)
+
+abline(
+  a = 0,
+  b = 1,
+  lty = 2
+)
+```
+
+En los 30 casos no utilizados para construir los modelos, el RLS obtuvo un RMSE de `r comparacion_predictiva["RLS", "RMSE"]` kg, un MAE de `r comparacion_predictiva["RLS", "MAE"]` kg y un R cuadrado de `r comparacion_predictiva["RLS", "Rsquared"]`.
+
+El RLM obtuvo un RMSE de `r comparacion_predictiva["RLM", "RMSE"]` kg, un MAE de `r comparacion_predictiva["RLM", "MAE"]` kg y un R cuadrado de `r comparacion_predictiva["RLM", "Rsquared"]`.
+
+```{r, results='asis', echo=FALSE}
+if (
+  comparacion_predictiva["RLM", "RMSE"] <
+    comparacion_predictiva["RLS", "RMSE"] &&
+  comparacion_predictiva["RLM", "MAE"] <
+    comparacion_predictiva["RLS", "MAE"] &&
+  comparacion_predictiva["RLM", "Rsquared"] >
+    comparacion_predictiva["RLS", "Rsquared"]
+) {
+
+  cat(
+    "El modelo de regresión lineal múltiple presenta una mejor ",
+    "calidad predictiva que el modelo simple, porque comete errores ",
+    "menores y reproduce mejor las diferencias observadas en el peso. ",
+    "Por lo tanto, agregar los predictores seleccionados mejoró la ",
+    "predicción en los datos no vistos."
+  )
+
+} else {
+
+  cat(
+    "El modelo de regresión lineal múltiple no supera al modelo ",
+    "simple en todas las medidas. Esto indica que agregar más ",
+    "predictores mejoró el ajuste con los datos de modelado, pero ",
+    "no necesariamente mejoró las predicciones en casos nuevos. ",
+    "Por ello, debe preferirse el modelo que presente los menores ",
+    "errores en los 30 casos de evaluación."
+  )
+}
+```
+
+# Conclusiones
+El modelo de RLS con `Waist.Girth` como predictor resultó confiable, aunque con un ajuste bastante más modesto que el del RLM (AIC = 465,92 frente a 382,62). Los residuos son independientes (Durbin-Watson, p=0,82), siguen una distribución normal (Shapiro-Wilk, p=0,607) y la varianza es homogénea (ncvTest, p=0,445). La linealidad quedó en el límite, es decir, la prueba de Tukey dio p=0,060, que no permite rechazar la linealidad al nivel habitual de 0,05, pero está cerca del umbral, por lo que conviene no descartar cierta curvatura leve en la relación entre `Waist.Girth` y `Weight`. Se encontró un caso atípico (fila 34, residuo estandarizado=3,008, justo sobre el umbral) y 4 casos influyentes según la distancia de Cook (filas 5, 34, 40 y 63), un número mayor que los 3 casos influyentes detectados en el RLM. Esto sugiere que el modelo simple es algo más sensible a observaciones puntuales que el modelo múltiple, lo que refuerza la conveniencia de usar el RLM.
+
+A partir de ese modelo de RLS, la incorporación mediante selección hacia adelante (basada en AIC) de las variables `Knee.Girth`, `Chest.Girth` y `Bitrochanteric.diameter` mejoró sustancialmente el ajuste del modelo: el R² ajustado aumentó y el AIC se redujo de 465,92 (RLS) a 382,62 (RLM), demostrando que estos predictores aportan información relevante para explicar el peso más allá del contorno de cintura.
+
+El modelo de RLM obtenido resultó confiable, es decir, no se detectaron casos atípicos, los residuos son independientes (Durbin-Watson, p=0,688), siguen una distribución normal (Shapiro-Wilk, p=0,701), la varianza es homogénea (p = 0.3497) y no existe multicolinealidad relevante entre los predictores (VIF < 2,3 en todos los casos). Se identificaron 3 casos influyentes (distancia de Cook). Al eliminarlos, el AIC mejoró de forma notoria (de 382,62 a 356,76) y el error estándar residual disminuyó (de 3,545 a 3,296), pero el R² ajustado en realidad bajó levemente (de 0,877 a 0,874), por lo que la evidencia de que el modelo corregido sea mejor no es unánime. Ante esta evidencia mixta, y dado que no existía una justificación rigurosa e independiente del ajuste para excluir esos casos, se optó por mantener el modelo con todos los datos originales.
+
+Al evaluar la capacidad predictiva en los 30 casos reservados y no usados para construir los modelos, el RLM superó al RLS en las tres métricas: menor RMSE 
+(4,96 kg frente a 5,57 kg), menor MAE (4,17 kg frente a 4,37 kg) y mayor R² (0,842 frente a 0,732). Esto confirma que la mejora observada en el ajuste no 
+se debió a un sobreajuste a los datos de entrenamiento, sino que se traduce en mejores predicciones sobre datos no vistos.
+
+Se concluye que el modelo de RLM que predice el peso a partir del contorno de cintura, contorno de rodilla, contorno de pecho y diámetro 
+bitrocantéreo es confiable y posee mejor poder predictivo que el modelo de RLS basado únicamente en el contorno de cintura, por lo que se recomienda su uso por sobre el modelo simple.
+
+# Referencias
+
+Jara, J. L., & Köhler, J. (s. f.). Inferencia y modelos estadísticos [Perusall].
+
+Heinz, G., Peterson, L. J., Johnson, R. W., & Kerk, C. J. (2003). Exploring Relationships in Body Dimensions. Journal Of Statistics Education, 11(2). https://doi.org/10.1080/10691898.2003.11910711
+
+Fox, John. (1991). Regression Diagnostics: An Introduction. Sage Publications (Serie Quantitative Applications in the Social Sciences).
+
+Hoaglin, David C., y Welsch, Roy E. (1978). "The Hat Matrix in Regression and ANOVA", publicado en la revista The American Statistician (Vol. 32, No. 1, pp. 17-22)

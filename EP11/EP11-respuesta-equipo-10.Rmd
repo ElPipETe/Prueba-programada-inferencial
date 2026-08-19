@@ -1,0 +1,258 @@
+---
+title: "EP11-respuesta-equipo-10"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, fig.align = "center")
+```
+
+# EP11: Regresión Lineal y Logística Múltiple
+
+```{r libraries}
+library(dplyr)
+library(caret)
+library(leaps)
+library(pROC)
+library(car)
+```
+
+## 1. Preparación de los datos
+
+```{r preparacion-datos}
+semilla <- 21491
+
+datos <- read.csv2("EP09 Datos.csv", sep = ";", dec = ",", header = TRUE)
+
+datos <- datos %>%
+  mutate(
+    Estatura_m = Height / 100,
+    IMC = Weight / (Estatura_m^2),
+    EN = ifelse(IMC >= 25, "Sobrepeso", "No_Sobrepeso"),
+    EN = factor(EN, levels = c("No_Sobrepeso", "Sobrepeso"))
+  ) %>%
+  select(-Estatura_m)
+
+set.seed(semilla)
+sobrepeso    <- datos %>% filter(EN == "Sobrepeso")    %>% sample_n(50)
+no_sobrepeso <- datos %>% filter(EN == "No_Sobrepeso") %>% sample_n(50)
+
+muestra <- bind_rows(sobrepeso, no_sobrepeso)
+table(muestra$EN)
+```
+
+## 2. Modelo de RLM para el peso (Weight)
+
+### Selección de predictores (leaps, búsqueda exhaustiva)
+
+```{r peso-seleccion}
+datos_peso <- muestra %>% select(-IMC, -EN)
+
+busqueda_peso <- regsubsets(Weight ~ ., data = datos_peso, nvmax = 8, method = "exhaustive")
+resumen_peso  <- summary(busqueda_peso)
+
+plot(busqueda_peso, scale = "bic", main = "Búsqueda exhaustiva: Weight")
+
+# Se restringe la elección a modelos de entre 2 y 8 predictores (se descarta el de 1)
+bic_validos  <- resumen_peso$bic[2:8]
+mejor_tamano <- which.min(bic_validos) + 1
+
+predictores_peso <- names(coef(busqueda_peso, mejor_tamano))[-1]
+cat("Predictores seleccionados para Weight:\n")
+print(predictores_peso)
+```
+
+### Modelo y evaluación con bootstrapping
+
+```{r peso-modelo}
+formula_peso <- as.formula(paste("Weight ~", paste(predictores_peso, collapse = " + ")))
+
+set.seed(semilla)
+modelo_peso <- train(
+  formula_peso,
+  data      = datos_peso,
+  method    = "lm",
+  trControl = trainControl(method = "boot", number = 1000)
+)
+print(modelo_peso)
+
+# Se reajusta con lm() directamente para el diagnóstico, ya que car::residualPlots()
+# no logra reconstruir la llamada interna que guarda train().
+modelo_peso_final <- lm(formula_peso, data = datos_peso)
+print(summary(modelo_peso_final))
+```
+
+### Bondad de ajuste
+
+```{r peso-diagnostico}
+tabla_peso <- residualPlots(modelo_peso_final, main = "Modelo Weight")
+durbinWatsonTest(modelo_peso_final)
+vif_peso <- vif(modelo_peso_final)
+print(vif_peso)
+influencePlot(modelo_peso_final, main = "Casos influyentes - Weight")
+```
+
+El modelo cumple el supuesto de independencia en los residuos (Durbin-Watson, $p = 0.984$) y no presenta observaciones con una Distancia de Cook alarmante (todas $< 1$); sin embargo, exhibe dos riesgos estructurales importantes que exigen cautela al interpretar sus coeficientes: el incumplimiento de la linealidad por evidencia de curvatura (Test de Tukey, $p < 0.001$) y la presencia de multicolinealidad severa, impulsada por el predictor Chest.Girth cuyo VIF supera el umbral crítico de 10.
+
+### Calidad predictiva y generalidad
+
+```{r peso-calidad}
+resample_peso <- modelo_peso$resample
+cat(sprintf("R² promedio (bootstrap): %.3f (D.E. = %.3f)\n",
+            mean(resample_peso$Rsquared), sd(resample_peso$Rsquared)))
+cat(sprintf("RMSE promedio (bootstrap): %.3f (D.E. = %.3f)\n",
+            mean(resample_peso$RMSE), sd(resample_peso$RMSE)))
+```
+
+La evaluación con 1.000 remuestreos bootstrap sobre datos no vistos estima una capacidad de generalización razonable, a pesar de los riesgos estructurales advertidos previamente.
+
+## 3. Modelo de RLM para el IMC mediante RFE
+
+### Selección de predictores
+
+Se acotó la función de selección en rfe() para garantizar un tamaño de 10 a 20 predictores, evitando que el algoritmo seleccione el modelo completo por defecto.
+
+```{r imc-rfe}
+datos_imc_x <- muestra %>% select(-Weight, -Height, -EN, -IMC)
+datos_imc_y <- muestra$IMC
+
+acota_tamano <- function(minimo, maximo) {
+  function(x, metric, maximize) {
+    candidatos <- subset(x, Variables >= minimo & Variables <= maximo)
+    pickSizeBest(candidatos, metric, maximize)
+  }
+}
+
+ctrl_rfe_imc <- rfeControl(functions = lmFuncs, method = "repeatedcv", number = 5, repeats = 5)
+ctrl_rfe_imc$functions$selectSize <- acota_tamano(10, 20)
+
+set.seed(semilla)
+rfe_imc <- rfe(
+  x = datos_imc_x, y = datos_imc_y, sizes = 10:20,
+  rfeControl = ctrl_rfe_imc,
+  metric = "Rsquared"
+)
+print(rfe_imc)
+plot(rfe_imc, type = c("g", "o"), main = "RFE: IMC")
+
+predictores_imc <- predictors(rfe_imc)
+cat("Número de predictores seleccionados para IMC:", length(predictores_imc), "\n")
+print(predictores_imc)
+```
+
+### Modelo, bondad de ajuste y generalidad
+
+```{r imc-modelo}
+formula_imc <- as.formula(paste("IMC ~", paste(predictores_imc, collapse = " + ")))
+modelo_imc_final <- lm(formula_imc, data = muestra)
+print(summary(modelo_imc_final))
+
+tabla_imc <- residualPlots(modelo_imc_final, main = "Modelo IMC")
+durbinWatsonTest(modelo_imc_final)
+vif_imc <- vif(modelo_imc_final)
+print(vif_imc)
+influencePlot(modelo_imc_final, main = "Casos influyentes - IMC")
+```
+
+El modelo de IMC resulta inestable y presenta riesgos estructurales importantes: incumple la linealidad por evidencia de curvatura (Test de Tukey, $p = 0.001$), exhibe multicolinealidad severa por el uso de múltiples medidas corporales correlacionadas (VIF > 10) y cuenta con una deficiente razón de observaciones por predictor (5.3), quedando muy por debajo del mínimo recomendado.
+
+### Calidad predictiva
+
+```{r imc-calidad}
+subset(rfe_imc$results, Variables == rfe_imc$optsize)
+
+resample_imc <- rfe_imc$resample
+cat(sprintf("R² promedio (validación cruzada 5x5): %.3f (D.E. = %.3f)\n",
+            mean(resample_imc$Rsquared), sd(resample_imc$Rsquared)))
+```
+
+## 4. Modelo de RLog para el estado nutricional (EN) mediante RFE
+
+### Selección de predictores
+
+Se aplicó RFE con remuestreo externo LOOCV para seleccionar entre 2 y 6 predictores optimizando la curva ROC. La validación cruzada interna se omitió (method = "none") para evitar el costo computacional prohibitivo de un LOOCV anidado.
+
+```{r en-rfe}
+datos_en_x <- muestra %>% select(-Weight, -Height, -IMC, -EN)
+datos_en_y <- muestra$EN
+
+ctrl_rfe_en <- rfeControl(functions = caretFuncs, method = "LOOCV", saveDetails = TRUE)
+ctrl_rfe_en$functions$selectSize  <- acota_tamano(2, 6)
+ctrl_rfe_en$functions$summary     <- twoClassSummary
+
+set.seed(semilla)
+rfe_en <- rfe(
+  x = datos_en_x, y = datos_en_y, sizes = 2:6,
+  rfeControl = ctrl_rfe_en,
+  method = "glm", family = "binomial", metric = "ROC",
+  trControl = trainControl(method = "none", classProbs = TRUE, summaryFunction = twoClassSummary)
+)
+print(rfe_en)
+
+predictores_en <- rfe_en$optVariables
+cat("Predictores seleccionados para EN:\n")
+print(predictores_en)
+```
+
+### Modelo final
+
+```{r en-modelo}
+formula_en <- as.formula(paste("EN ~", paste(predictores_en, collapse = " + ")))
+modelo_en  <- glm(formula_en, data = muestra, family = binomial(link = "logit"))
+print(summary(modelo_en))
+```
+
+### Bondad de ajuste
+
+```{r en-diagnostico}
+tabla_en <- residualPlots(modelo_en, fitted = FALSE)
+crPlots(modelo_en)
+durbinWatsonTest(modelo_en)
+vif_en <- vif(modelo_en)
+print(vif_en)
+influencePlot(modelo_en, main = "Casos influyentes - EN")
+
+se_max_en <- max(summary(modelo_en)$coefficients[, "Std. Error"])
+```
+
+El modelo logístico cumple satisfactoriamente todos sus supuestos teóricos: no presenta evidencia de curvatura en los predictores (linealidad), los VIF se mantienen bajo 5 (ausencia de multicolinealidad), los errores estándar descartan problemas de separación perfecta, y la muestra cumple holgadamente la recomendación mínima de observaciones por predictor.
+
+### Calidad predictiva
+
+Para evitar el sesgo optimista de evaluar el modelo con sus propios datos de entrenamiento, la curva ROC y la calidad predictiva real se estiman de forma imparcial mediante validación cruzada dejando uno fuera (LOOCV).
+
+```{r en-roc}
+probs_en <- predict(modelo_en, type = "response")
+roc_en <- roc(muestra$EN, probs_en, levels = c("No_Sobrepeso", "Sobrepeso"),
+              direction = "<", quiet = TRUE)
+plot(roc_en, col = "steelblue", lwd = 2,
+     main = paste("Curva ROC EN (AUC muestra completa =", round(auc(roc_en), 3), ")"))
+abline(a = 1, b = -1, col = "firebrick", lty = 2)
+```
+
+```{r en-loocv}
+n_muestra   <- nrow(muestra)
+probs_loocv <- numeric(n_muestra)
+
+for (i in seq_len(n_muestra)) {
+  modelo_i <- glm(formula_en, data = muestra[-i, ], family = binomial(link = "logit"))
+  probs_loocv[i] <- predict(modelo_i, newdata = muestra[i, ], type = "response")
+}
+
+roc_loocv <- roc(muestra$EN, probs_loocv, levels = c("No_Sobrepeso", "Sobrepeso"),
+                  direction = "<", quiet = TRUE)
+cat(sprintf("AUC (LOOCV): %.3f\n", auc(roc_loocv)))
+
+pred_loocv <- factor(ifelse(probs_loocv >= 0.5, "Sobrepeso", "No_Sobrepeso"),
+                      levels = c("No_Sobrepeso", "Sobrepeso"))
+confusionMatrix(pred_loocv, muestra$EN, positive = "Sobrepeso")
+```
+
+## 5. Conclusiones
+
+El modelo de Weight (`r length(predictores_peso)` predictores) presenta un alto poder predictivo (R² promedio de `r round(mean(resample_peso$Rsquared), 3)` vía bootstrapping en datos no vistos). Sin embargo, exige cautela al interpretar sus coeficientes debido a riesgos estructurales de curvatura (Test de Tukey) y multicolinealidad (VIF elevados).
+
+El modelo de IMC (`r length(predictores_imc)` predictores) alcanza un R² promedio de `r round(mean(resample_imc$Rsquared), 3)` en validación cruzada. Aunque su capacidad predictiva es adecuada, resulta menos confiable y estable que el modelo de Weight debido a una deficiente razón de observaciones por predictor y a la severa multicolinealidad de las medidas corporales.
+
+El modelo de EN (`r length(predictores_en)` predictores) demuestra una excelente capacidad discriminatoria (AUC de `r round(auc(roc_loocv), 3)` mediante LOOCV). Si bien descarta problemas de multicolinealidad y separación perfecta, presenta una violación a la independencia de los residuos (autocorrelación detectada), lo que constituye una limitación teórica pese a su robusto desempeño práctico como clasificador.

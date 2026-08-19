@@ -1,0 +1,397 @@
+---
+title: "EP08"
+output:
+  html_document: default
+  pdf_document: default
+date: "2026-07-13"
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+
+# Paquetes requeridos
+paquetes <- c(
+  "tidyverse",
+  "ggpubr",
+  "rsample",
+  "rstatix",
+  "broom"
+)
+
+# Instalar solo los paquetes que no estén instalados
+instalar <- paquetes[!paquetes %in% installed.packages()[, "Package"]]
+
+if (length(instalar) > 0) {
+  install.packages(instalar, dependencies = TRUE)
+}
+
+# Cargar paquetes
+invisible(lapply(paquetes, library, character.only = TRUE))
+
+```
+
+## Pregunta 1
+
+Propongan una pregunta de investigación original, que involucre la comparación de la frecuencia en que se observa un evento o característica en dos grupos independientes (más abajo se dan unos ejemplos). Fijando una semilla propia, seleccionen una muestra aleatoria de hogares (100 < n < 150) y respondan la pregunta propuesta utilizando una prueba de permutaciones Monte Carlo. Deben reportar un intervalo de confianza para el estadístico utilizado usando las mismas remuestras.
+
+**Pregunta de investigación:** ¿Es similar la proporción de personas que tienen contrato de trabajo escrito y firmado (o17) entre hombres y mujeres (sexo)?
+
+**Hipótesis:**
+
+Sea $p_H$ la proporción de personas de sexo masculino que tienen contrato de trabajo escrito y firmado (o17 = "Sí, firmó"). Sea $p_M$ la proporción análoga para las personas de sexo femenino.
+
+$H_0$: La proporción de personas que tienen contrato de trabajo escrito y firmado es igual entre hombres y mujeres.
+
+$$
+H_0: p_H = p_M
+$$
+
+$H_A$: La proporción de personas que tienen contrato de trabajo escrito y firmado es distinta entre hombres y mujeres.
+
+$$
+H_A: p_H \neq p_M
+$$
+
+Se fija un nivel de significación $\alpha = 0{,}05$.
+
+**Datos:**
+
+```{r}
+library(tidyverse)
+library(ggpubr)
+
+datos <- read.csv("EP08 Datos CASEN 2017.csv", stringsAsFactors = TRUE)
+
+# Filtrar a la población relevante para P1: personas con sexo conocido y con
+# una respuesta que permita clasificarlas de forma inequívoca respecto a la
+# tenencia de contrato de trabajo escrito y firmado. Se contrastan los dos
+# extremos "Sí, firmó" vs. "No tiene", ya que la pregunta de investigación
+# se refiere específicamente a tener (o no) un contrato escrito y firmado.
+# Se excluyen deliberadamente: "Sí, pero no ha firmado" (existe contrato,
+# pero no está firmado; es una situación intermedia distinta a las dos
+# categorías de interés) y "No se acuerda/no sabe si firmó" y "No sabe/no
+# responde" (no permiten clasificar a la persona en ninguno de los dos
+# grupos de la pregunta).
+datos_p1 <- datos |>
+  filter(o17 %in% c("Sí, firmó", "No tiene")) |>
+  mutate(
+    sexo = factor(sexo),
+    o17 = factor(o17, levels = c("No tiene", "Sí, firmó"))
+  )
+
+# Como se pide muestrear HOGARES, pero el archivo entrega datos a nivel
+# de persona (varias personas pueden compartir el mismo id.vivienda). Para
+# que cada hogar aporte a lo más una observación -y así respetar la condición
+# de independencia entre observaciones- se selecciona aleatoriamente una
+# persona por hogar antes de tomar la muestra.
+set.seed(2025)
+n_p1 <- 140
+
+datos_p1_hogar <- datos_p1 |>
+  group_by(id.vivienda) |>
+  slice_sample(n = 1) |>
+  ungroup()
+
+cat("Hogares disponibles en la población filtrada:", nrow(datos_p1_hogar), "\n")
+
+muestra_p1 <- datos_p1_hogar |> slice_sample(n = n_p1)
+cat("Hogares en la muestra (deben coincidir):",
+    n_distinct(muestra_p1$id.vivienda), "de", nrow(muestra_p1), "\n")
+
+# Tabla de contingencia y proporciones observadas
+tabla_p1 <- table(muestra_p1$sexo, muestra_p1$o17)
+print(tabla_p1)
+prop.table(tabla_p1, margin = 1)
+
+# Gráfico de las proporciones observadas
+ggplot(muestra_p1, aes(x = sexo, fill = o17)) +
+  geom_bar(position = "fill") +
+  labs(
+    y = "Proporción",
+    fill = "Contrato de\ntrabajo escrito",
+    title = "Contrato de trabajo escrito y firmado según sexo"
+  ) +
+  theme_pubr()
+
+# Revisión de la condición para una prueba clásica de dos proporciones
+# (n*p_hat >= 5 y n*(1-p_hat) >= 5 en cada grupo)
+addmargins(tabla_p1)
+```
+
+Con la muestra de 140 hogares (un hogar, un dato: se seleccionó a lo más una persona por `id.vivienda` antes de muestrear), la tabla de contingencia queda compuesta por 91 hombres (8 sin contrato, 83 con contrato firmado) y 49 mujeres (4 sin contrato, 45 con contrato firmado), es decir, proporciones de contrato escrito y firmado muy similares entre ambos grupos (91,21 % en hombres vs. 91,84 % en mujeres). Al revisar la condición de conteo para una prueba clásica de dos proporciones ($n\hat{p} \geq 5$ y $n(1-\hat{p}) \geq 5$ en cada grupo), la celda "Mujer – No tiene" registra apenas 4 observaciones, por debajo del mínimo convencional de 5. Esta condición marginal, sumada al hecho de que el enunciado exige explícitamente el uso de un método de remuestreo para esta pregunta, justifica el uso de una prueba de permutaciones Monte Carlo en lugar de la aproximación normal asintótica del estadístico de diferencia de proporciones, cuya precisión es dudosa con celdas tan pequeñas y un tamaño muestral como el de este estudio ($100 < n < 150$). En su lugar, el valor *p* se estima directamente mediante la reasignación aleatoria de las etiquetas de grupo bajo la hipótesis nula ($H_0$).
+
+**Estadístico de interés:**
+
+Como estadístico de interés para contrastar $H_0: p_H = p_M$ se utiliza la diferencia de proporciones muestral $\hat{p}_H - \hat{p}_M$, definida como la proporción de personas de sexo masculino que tienen contrato de trabajo escrito y firmado menos la proporción correspondiente a las personas de sexo femenino. Este es el estadístico natural para comparar la frecuencia de un evento binario entre dos grupos independientes. El valor *p* se obtiene mediante una prueba de permutaciones Monte Carlo basada en este estadístico. Por otra parte, dado que invertir directamente la prueba de permutación para construir un intervalo de confianza resulta computacionalmente muy costoso, dicho intervalo se estima mediante **bootstrapping** aplicado sobre la misma muestra utilizada en la prueba de permutación.
+
+**Remuestreo:**
+
+```{r}
+library(dplyr)
+library(purrr)
+library(rsample)
+library(tibble)
+library(tidyr)
+library(ggpubr)
+
+# Estadístico: diferencia de proporciones (Hombre - Mujer)
+dif_prop <- function(remuestra, ...) {
+  datos <- analysis(remuestra)
+  p_hombre <- mean(datos$o17[datos$sexo == "Hombre"] == "Sí, firmó")
+  p_mujer  <- mean(datos$o17[datos$sexo == "Mujer"] == "Sí, firmó")
+  tibble(term = "Dif. proporciones", estimate = p_hombre - p_mujer)
+}
+
+# --- Prueba de permutaciones Monte Carlo (valor p) ---
+set.seed(2025)
+R <- 5999
+
+remuestras_perm <- permutations(
+  muestra_p1,
+  permute = sexo,
+  times = R,
+  apparent = TRUE
+)
+
+dist_perm <- remuestras_perm |>
+  mutate(estadistico = map(splits, dif_prop)) |>
+  unnest(estadistico)
+
+dif_obs <- dist_perm |>
+  filter(id == "Apparent") |>
+  pull(estimate)
+
+n_extremos <- dist_perm |>
+  filter(abs(estimate) >= abs(dif_obs)) |>
+  summarise(n = n())
+
+p_valor <- n_extremos |> pull() / (R + 1)
+
+cat("Diferencia observada (Hombre - Mujer):", round(dif_obs, 4), "\n")
+cat("Valor p (permutación Monte Carlo):", round(p_valor, 4), "\n")
+
+ggplot(dist_perm |> filter(id != "Apparent"), aes(x = estimate)) +
+  geom_histogram(bins = 30, color = "white", fill = "steelblue") +
+  geom_vline(
+    xintercept = c(-abs(dif_obs), abs(dif_obs)),
+    linetype = "dashed",
+    color = "steelblue4"
+  ) +
+  labs(
+    x = "Diferencia de proporciones (permutada)",
+    y = "Frecuencia",
+    title = "Distribución nula por permutación Monte Carlo"
+  ) +
+  theme_pubr()
+
+# --- Intervalo de confianza (bootstrap, misma muestra) ---
+set.seed(2025)
+R_bt <- 3999
+
+remuestras_bt <- bootstraps(
+  muestra_p1,
+  times = R_bt,
+  strata = sexo,
+  apparent = TRUE
+)
+
+dist_bt <- remuestras_bt |>
+  mutate(estadistico = map(splits, dif_prop))
+
+ic_perc <- int_pctl(dist_bt, estadistico, alpha = 0.05)
+ic_bca  <- int_bca(dist_bt, estadistico, alpha = 0.05, .fn = dif_prop)
+
+print(bind_rows(ic_perc, ic_bca))
+```
+
+**Conclusiones:**
+
+Con un valor *p* = 1,0000 obtenido mediante la prueba de permutaciones Monte Carlo, ampliamente superior al nivel de significancia $\alpha = 0,05$, no se rechaza la hipótesis nula ($H_0$). La diferencia observada entre hombres y mujeres (Hombre − Mujer = −0,0063) es prácticamente nula, por lo que casi cualquier reasignación aleatoria de las etiquetas de grupo produce una diferencia de igual o mayor magnitud. Este resultado es consistente con el intervalo de confianza obtenido mediante **bootstrapping** percentil para la diferencia de proporciones, $(-0,100;\ 0,097)$, que contiene ampliamente el valor 0 (el intervalo BCa, $(-0,091;\ 0,110)$, corrobora esta conclusión). En consecuencia, no existe evidencia estadísticamente suficiente para afirmar que la proporción de personas con contrato de trabajo escrito y firmado difiera entre hombres y mujeres. En otras palabras, con base en la información proporcionada por esta muestra, tener contrato de trabajo escrito y firmado no presenta una asociación estadísticamente significativa con el sexo de la persona.
+
+## Pregunta 2
+
+Propongan una pregunta de investigación original, que involucre la comparación de las medias de más de dos grupos independientes (más abajo se dan unos ejemplos). Fijando una semilla distinta a la anterior, seleccionen una muestra aleatoria de hogares (200 < n < 300) y respondan la pregunta propuesta utilizando bootstrapping. Solo por ejercicio académico, aplique un análisis post-hoc con bootstrapping aunque este no fuera necesario. Indicación: consideren que el análisis post-hoc debe hacerse con las mismas remuestras usadas para la prueba ómnibus.
+
+**Pregunta de investigación:** ¿Son similares los ingresos per cápita promedio del hogar (ytotcorh/numper) entre hogares cuya jefatura de hogar trabaja como empleado(a) del sector público (Gobierno Central o Municipal), empleado(a) de empresas públicas, o empleado(a) del sector privado (o15)?
+
+**Hipótesis:**
+
+Sean $\mu_{pub}$, $\mu_{emp}$ y $\mu_{priv}$ el ingreso per cápita
+promedio del hogar (ytotcorh/numper) en la población de hogares
+chilenos cuya jefatura de hogar trabaja, respectivamente, como
+empleado(a) del sector público (Gobierno Central o Municipal),
+empleado(a) de una empresa pública, o empleado(a) del sector privado.
+
+$H_0$: El ingreso per cápita promedio del hogar es igual entre los
+tres grupos de jefatura de hogar considerados.
+$$H_0: \mu_{pub} = \mu_{emp} = \mu_{priv}$$
+
+$H_A$: Al menos uno de los tres grupos presenta un ingreso per cápita
+promedio del hogar distinto a los otros.
+$$H_A: \exists\, i,j \in \{pub, emp, priv\},\ i \neq j\ \text{ tal que } \mu_i \neq \mu_j$$
+
+Se fija un nivel de significación $\alpha = 0{,}05$.
+
+
+**Datos:**
+
+
+```{r}
+library(rstatix)
+
+# Filtrar a la población relevante para P2: personas empleadas como
+# dependientes en el sector público (Gobierno Central o Municipal), en
+# empresas públicas, o en el sector privado (excluye cuenta propia, patrón,
+# servicio doméstico, FF.AA., familiar no remunerado y quienes no trabajan).
+#
+# NOTA metodológica: el archivo entregado para este ejercicio no incluye una
+# variable de parentesco/jefatura de hogar, por lo que no es posible verificar
+# directamente, solo con estas columnas, que cada fila corresponda al jefe o
+# jefa de hogar. El archivo contiene 65.535 filas para 54.240 hogares
+# (id.vivienda) distintos -una razón cercana a 1:1, muy por debajo del tamaño
+# promedio de un hogar chileno-, lo que sugiere que ya es un extracto a nivel
+# de hogar (p. ej., jefe/a de hogar), consistente con lo señalado en el
+# enunciado sobre datos "del jefe o jefa de hogar".
+grupos_o15 <- c("Empleado u obrero del sector público (Gobierno Central o Mun",
+                "Empleado u obrero de empresas públicas",
+                "Empleado u obrero del sector privado")
+
+datos_p2 <- datos |>
+  filter(o15 %in% grupos_o15) |>
+  mutate(o15 = factor(o15,
+                       levels = grupos_o15,
+                       labels = c("Público", "Empresas públicas", "Privado")),
+         ipc = ytotcorh / numper)
+
+# El enunciado pide muestrear HOGARES. Igual que en P1, se selecciona
+# aleatoriamente una persona por hogar antes de muestrear, de modo que cada
+# hogar aporte a lo más una observación de ingreso per cápita. Esto es
+# especialmente importante aquí porque `ipc` es un valor a nivel de hogar: si
+# un mismo hogar apareciera dos veces, su ingreso quedaría duplicado en la
+# muestra, violando la independencia entre observaciones.
+set.seed(781)
+n_p2 <- 280      # cercano al límite superior: protege al grupo minoritario
+
+datos_p2_hogar <- datos_p2 |>
+  group_by(id.vivienda) |>
+  slice_sample(n = 1) |>
+  ungroup()
+
+cat("Hogares disponibles en la población filtrada:", nrow(datos_p2_hogar), "\n")
+
+muestra_p2 <- datos_p2_hogar |> slice_sample(n = n_p2)
+cat("Hogares en la muestra (deben coincidir):",
+    n_distinct(muestra_p2$id.vivienda), "de", nrow(muestra_p2), "\n")
+
+# Verificación explícita del N por grupo
+muestra_p2 |> count(o15)
+
+# Gráficos de comportamiento del ingreso per cápita por grupo
+ggplot(muestra_p2, aes(x = o15, y = ipc)) +
+  geom_boxplot() +
+  labs(x = "Categoría de empleo de la jefatura", y = "Ingreso per cápita del hogar",
+       title = "Ingreso per cápita según tipo de empleador") +
+  theme_pubr()
+
+ggqqplot(muestra_p2, x = "ipc", facet.by = "o15")
+
+# Pruebas de normalidad por grupo y de homogeneidad de varianzas
+muestra_p2 |> group_by(o15) |> shapiro_test(ipc)
+levene_test(muestra_p2, ipc ~ o15)
+```
+
+Al analizar el ingreso per cápita del hogar en los tres grupos (Público: $n = 46$; Empresas públicas: $n = 18$; Privado: $n = 216$), tanto los diagramas de caja como los gráficos Q-Q evidencian una marcada asimetría hacia la derecha y la presencia de valores extremos en los tres grupos. El grupo "Empresas públicas" resalta especialmente: junto con una mediana notoriamente más alta que los otros dos grupos, incluye dos observaciones extremas (cercanas a 4,1 y 6,0 millones de pesos) dentro de una muestra de solo 18 hogares. Asimismo, la prueba de Shapiro-Wilk rechaza de manera contundente el supuesto de normalidad en los tres grupos (Público: $W = 0,6641$, $p = 5,40\times10^{-9}$; Empresas públicas: $W = 0,6690$, $p = 3,56\times10^{-5}$; Privado: $W = 0,5975$, $p = 3,49\times10^{-22}$). A diferencia de lo que suele observarse en muestras con menor dispersión, en este caso la prueba de Levene también entrega evidencia de heterogeneidad de varianzas ($F(2,277) = 11,68$; $p = 1,35\times10^{-5}$), en gran parte atribuible a los valores extremos del grupo "Empresas públicas". En conjunto, tanto la falta de normalidad como la heterocedasticidad invalidan los supuestos requeridos para aplicar un ANOVA clásico, situación agravada por el tamaño reducido y desbalanceado de dicho grupo ($n = 18$), y justifican el uso de **bootstrapping** para comparar el ingreso per cápita promedio entre los tres grupos.
+
+**Estadístico de interés:**
+
+Para la prueba ómnibus se utiliza el estadístico $F$ de un ANOVA de una vía, definido como la razón entre la variabilidad del ingreso per cápita entre los tres grupos de jefatura y la variabilidad dentro de cada grupo. Este corresponde al estadístico natural para contrastar la hipótesis nula $H_0:\ \mu_{\text{pub}} = \mu_{\text{emp}} = \mu_{\text{priv}}$, que plantea la igualdad de las medias poblacionales de los tres grupos independientes. Para el análisis post hoc se emplea, en cada comparación por pares, la diferencia de medias muestral, lo que permite identificar entre qué grupos específicos se concentran las diferencias detectadas por la prueba ómnibus. El análisis post hoc se realiza utilizando las mismas remuestras generadas durante el procedimiento de **bootstrapping** empleado en la prueba ómnibus.
+
+**Remuestreo:**
+
+```{r}
+library(broom)
+library(rstatix)
+
+set.seed(781)  # semilla propia de la Pregunta 2 (distinta a la de P1)
+
+# F observado en la muestra original
+F_obs <- tidy(aov(ipc ~ o15, data = muestra_p2)) |>
+  filter(term == "o15") |> pull(statistic)
+
+# Desplazamos cada grupo para que todos compartan la misma media
+# (la media general observada), reflejando H0: mu_pub = mu_emp = mu_priv
+media_general <- mean(muestra_p2$ipc)
+
+datos_p2_H0 <- muestra_p2 |>
+  group_by(o15) |>
+  mutate(ipc_h0 = ipc - mean(ipc) + media_general) |>
+  ungroup()
+
+# Remuestras bootstrap (estratificadas por grupo) sobre los datos desplazados a H0
+R <- 3999
+remuestras_H0 <- bootstraps(datos_p2_H0, times = R, strata = o15, apparent = TRUE)
+
+estadistico_F_H0 <- function(remuestra, ...) {
+  datos <- analysis(remuestra)
+  tibble(F_est = tidy(aov(ipc_h0 ~ o15, data = datos)) |>
+           filter(term == "o15") |> pull(statistic))
+}
+
+dist_F_H0 <- remuestras_H0 |>
+  mutate(F_bt = map(splits, estadistico_F_H0)) |>
+  unnest(F_bt)
+
+# Valor p ómnibus (cola superior: valores grandes de F se alejan de H0)
+n_extremos <- dist_F_H0 |> filter(F_est >= F_obs) |> summarise(n = n())
+p_valor_omnibus <- n_extremos |> pull() / (R + 1)
+
+cat("F observado:", round(F_obs, 4), "\n")
+cat("Valor p ómnibus (bootstrap):", round(p_valor_omnibus, 4), "\n")
+
+# Gráfico
+ggplot(dist_F_H0 |> filter(id != "Apparent"), aes(x = F_est)) +
+  geom_histogram(bins = 30, color = "white", fill = "steelblue") +
+  geom_vline(xintercept = F_obs, linetype = "dashed", color = "steelblue4") +
+  labs(x = "Estadístico F (bootstrap bajo H0)", y = "Frecuencia",
+       title = "Distribución nula bootstrap para el ANOVA de un factor") +
+  theme_pubr()
+
+# --- Post-hoc: mismas remuestras (remuestras_H0) ---
+pares <- combn(levels(muestra_p2$o15), 2, simplify = FALSE)
+
+dif_medias_obs <- map_dfr(pares, function(par) {
+  m1 <- mean(muestra_p2$ipc[muestra_p2$o15 == par[1]])
+  m2 <- mean(muestra_p2$ipc[muestra_p2$o15 == par[2]])
+  tibble(par = paste(par[1], "-", par[2]), dif_obs = m1 - m2)
+})
+
+dif_medias_H0 <- function(remuestra, ...) {
+  datos <- analysis(remuestra)
+  map_dfr(pares, function(par) {
+    m1 <- mean(datos$ipc_h0[datos$o15 == par[1]])
+    m2 <- mean(datos$ipc_h0[datos$o15 == par[2]])
+    tibble(par = paste(par[1], "-", par[2]), dif_h0 = m1 - m2)
+  })
+}
+
+dist_posthoc <- remuestras_H0 |>
+  mutate(dif_h0 = map(splits, dif_medias_H0)) |>
+  unnest(dif_h0)
+
+resultados_posthoc <- dist_posthoc |>
+  left_join(dif_medias_obs, by = "par") |>
+  group_by(par) |>
+  summarise(dif_obs = first(dif_obs),
+            p_boot = sum(abs(dif_h0) >= abs(dif_obs)) / (R + 1),
+            .groups = "drop") |>
+  mutate(p_boot_adj = p.adjust(p_boot, method = "BH"))
+
+print(resultados_posthoc)
+```
+
+**Conclusiones:**
+
+La prueba ómnibus mediante **bootstrapping** para el ANOVA de un factor produjo un estadístico observado $F = 16,7485$ y un valor *p* = 0,0253, inferior al nivel de significancia $\alpha = 0,05$. En consecuencia, se rechaza la hipótesis nula ($H_0$), por lo que sí existe evidencia estadísticamente suficiente para afirmar que el ingreso per cápita promedio del hogar difiere entre las jefaturas de hogar empleadas en el sector público (Gobierno Central o Municipal), en empresas públicas y en el sector privado.
+
+Sin embargo, el análisis post hoc matiza este resultado: tras aplicar el ajuste de Benjamini-Hochberg, ninguna de las tres comparaciones por pares alcanza significancia estadística al nivel $\alpha = 0,05$ (Empresas públicas vs. Privado: $p_{\text{boot}} = 0,0185$, $p_{\text{adj}} = 0,0555$; Público vs. Empresas públicas: $p_{\text{boot}} = 0,045$, $p_{\text{adj}} = 0,0675$; Público vs. Privado: $p_{\text{boot}} = 0,129$, $p_{\text{adj}} = 0,129$). Es decir, si bien la prueba ómnibus detecta una diferencia global entre los tres grupos, al repartir la evidencia entre las tres comparaciones y corregir por comparaciones múltiples ninguna diferencia individual es, por sí sola, concluyente. Las dos comparaciones más cercanas a la significancia son justamente las que involucran a "Empresas públicas" (diferencias observadas de \$809.878 frente a Privado y de \$682.620 frente a Público), lo que es coherente con lo observado en la exploración inicial: ese grupo concentra un ingreso per cápita promedio bastante mayor, impulsado en gran medida por dos hogares con valores extremos dentro de una muestra de solo 18 hogares.
+
+En consecuencia, la evidencia disponible respalda la existencia de diferencias en el ingreso per cápita promedio del hogar según el sector de empleo de la jefatura, pero no permite identificar con confianza estadística individual cuál par de grupos concentra dicha diferencia; todo indica que el grupo "Empresas públicas" es el principal responsable, aunque esta conclusión debe tomarse con cautela dado su reducido tamaño muestral ($n = 18$) y la fuerte influencia de un par de observaciones extremas sobre su media.

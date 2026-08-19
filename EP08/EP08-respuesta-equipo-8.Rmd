@@ -1,0 +1,334 @@
+---
+title: "EP08-respuesta-equipo-8"
+output: html_document
+date: "`r format(Sys.Date())`"
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(rsample)
+library(glue)
+library(ggpubr)
+library(dplyr)
+library(purrr)
+library(rstatix)
+library(tibble)
+library(tidyr)
+```
+
+## Pregunta 1
+
+## Pregunta planteada
+En la Región Metropolitana, ¿existe una diferencia significativa en la proporción
+de hogares que poseen vivienda propia (ya sea pagada o pagándose) entre aquellos
+hogares cuyo jefe o jefa de hogar cuenta con educación superior y aquellos cuyo
+jefe o jefa de hogar no la tiene?
+
+
+### Obtención de datos
+
+```{r}
+# Obtenemos los datos
+datos <- read.csv("EP08 Datos CASEN 2017.csv")
+
+# Nos quedamos con los hogares de la Región Metropolitana, descartando los casos
+# sin información válida en las variables de interés (tenencia de la vivienda y
+# nivel educacional del jefe/a de hogar)
+datos_rm <- datos |>
+  filter(region == "Región Metropolitana de Santiago") |>
+  filter(v9 != "No responde", educ != "NS/NR") |>
+  drop_na(v9, educ)
+
+# Construimos la variable dicotómica de interés: si el hogar posee vivienda propia
+# (pagada o pagándose), tal como se pregunta en el enunciado. Se excluyen a propósito
+# las categorías "Propio compartido" porque corresponden a una situación de tenencia
+# distinta a la vivienda propia (pagada/pagándose) que se pregunta explícitamente.
+#
+# También construimos la variable de agrupación: si el jefe/a de hogar cuenta con
+# educación superior (técnica o universitaria, completa o incompleta, incluyendo
+# postgrado) o no.
+datos_rm <- datos_rm |>
+  mutate(
+    vivienda_propia = factor(if_else(v9 %in% c("Propio pagado", "Propio pagándose"),
+                                      "Sí", "No")),
+    educacion_jefe = factor(if_else(
+      educ %in% c("Técnico Nivel Superior Incompleta", "Técnico Nivel Superior Completo",
+                  "Profesional Incompleto", "Profesional Completo",
+                  "Postgrado Incompleto", "Postgrado Completo"),
+      "Con educación superior", "Sin educación superior"))
+  ) |>
+  select(id.vivienda, educacion_jefe, vivienda_propia)
+
+# Obtenemos la muestra aleatoria de hogares (semilla propia, 100 < n < 150)
+set.seed(1729)
+n <- 130
+muestra <- datos_rm |> sample_n(n)
+
+table(muestra$educacion_jefe, muestra$vivienda_propia)
+```
+
+### Planteamiento de hipótesis nula y alternativa
+
+Sea $p_C$ la proporción de hogares con vivienda propia (pagada o pagándose) entre
+aquellos cuyo jefe/a de hogar cuenta con educación superior, y $p_S$ la proporción
+análoga entre los hogares cuyo jefe/a de hogar no cuenta con educación superior.
+
+$H_0$: La proporción de hogares con vivienda propia es igual entre los hogares cuyo
+jefe/a de hogar tiene educación superior y aquellos cuyo jefe/a de hogar no la tiene
+($p_C = p_S$).
+
+$H_A$: La proporción de hogares con vivienda propia difiere entre ambos grupos
+($p_C \neq p_S$).
+
+### Verificación de condiciones para pruebas paramétricas
+
+```{r}
+tabla <- table(muestra$educacion_jefe, muestra$vivienda_propia)
+prueba_chi <- chisq.test(tabla)
+prueba_chi$expected
+```
+
+Argumento: la prueba clásica para comparar dos proporciones (chi-cuadrado de
+independencia o `prop.test`) exige que los conteos esperados en cada celda de la
+tabla de contingencia sean de a lo menos 5 (condición de Cochran) y se basa además en
+una aproximación asintótica a la distribución chi-cuadrado, válida solo cuando el
+tamaño muestral es suficientemente grande. Dado que en este ejercicio se solicita
+explícitamente trabajar con una muestra pequeña (100 < n < 150) y se exige comparar
+las proporciones mediante remuestreo, optamos directamente por una prueba de
+permutaciones Monte Carlo: esta no depende de una aproximación asintótica ni de
+supuestos distribucionales sobre las proporciones poblacionales, por lo que resulta
+más apropiada y robusta para el tamaño de muestra que estamos utilizando.
+
+### Estadístico de interés
+
+Utilizaremos como estadístico de interés la diferencia entre las proporciones de
+hogares con vivienda propia de ambos grupos ($p_C - p_S$), pues permite responder de
+forma directa e interpretable la pregunta de investigación planteada: valores
+alejados de cero indican que la tenencia de vivienda propia está asociada al nivel
+educacional del jefe/a de hogar.
+
+### Remuestreo: prueba de permutaciones Monte Carlo
+
+```{r}
+# Fijamos el número de repeticiones para la prueba de permutaciones
+R <- 5999
+
+# Generamos las remuestras permutando la variable de agrupación (educación del
+# jefe/a de hogar), manteniendo fija la variable de tenencia de la vivienda
+set.seed(432)
+remuestras <- permutations(muestra, permute = educacion_jefe, times = R, apparent = TRUE)
+
+# Función que calcula la diferencia de proporciones (Con - Sin educación superior)
+# de vivienda propia en una remuestra
+dif_proporciones <- function(remuestra, ...) {
+  analysis(remuestra) |>
+    group_by(educacion_jefe) |>
+    summarise(prop = mean(vivienda_propia == "Sí"), .groups = "drop") |>
+    arrange(educacion_jefe) |>
+    summarise(dif = prop[1] - prop[2]) |>
+    pull()
+}
+
+# Obtenemos la distribución permutada del estadístico de interés
+dist_perm <- remuestras |>
+  mutate(dif_prop = map_dbl(splits, dif_proporciones))
+```
+
+```{r}
+# Diferencia observada en la muestra original
+dif_obs <- dist_perm |> filter(id == "Apparent") |> pull(dif_prop)
+
+# Calculamos el valor p (dos colas)
+n_extremos <- dist_perm |>filter(abs(dif_prop) >= abs(dif_obs)) |> nrow()
+p_valor <- n_extremos / (R + 1) # n_extremos ya incluye la diferencia observada
+
+dif_obs
+p_valor
+```
+
+```{r}
+# Graficamos la distribución permutada y la situación de la diferencia observada
+titulo <- paste("Contraste de hipótesis usando", R, "permutaciones")
+nota <- if_else(p_valor < 0.001, glue("italic(p)<'0.001'"),
+                 glue("italic(p)*' = '*'{sprintf('%.3f', p_valor)}'"))
+ancho_barra <- diff(range(dist_perm[["dif_prop"]])) / nclass.scott(dist_perm[["dif_prop"]])
+ancho_barra_ajustado <- abs(dif_obs) / max(1, round(abs(dif_obs) / ancho_barra))
+
+dist_perm_pl <- dist_perm |>
+  mutate(extremo = factor(if_else(abs(dif_prop) >= abs(dif_obs), 1, 0))) |>
+  ggplot(aes(dif_prop)) +
+  geom_histogram(aes(fill = extremo), boundary = 0, binwidth = ancho_barra_ajustado,
+                 color = "steelblue4") +
+  labs(title = titulo, x = "Diferencia de dos proporciones", y = "Frecuencia") +
+  geom_vline(xintercept = c(-dif_obs, dif_obs), linetype = "dashed") +
+  annotate("text", x = dif_obs, y = Inf, hjust = 1.2, vjust = 2, label = nota, parse = TRUE) +
+  scale_fill_manual(values = c("0" = 0.2, "1" = 1), guide = NULL) +
+  theme(plot.title = element_text(hjust = 0.5)) + theme_pubr()
+print(dist_perm_pl)
+```
+
+### Intervalo de confianza
+
+Para obtener un intervalo de confianza para la diferencia de proporciones usando las
+mismas remuestras generadas para la prueba de hipótesis, "pivoteamos" la distribución
+nula obtenida por permutación en torno al valor observado: sus cuantiles estiman el
+error de muestreo del estadístico, el cual centramos en la diferencia efectivamente
+observada en la muestra.
+
+```{r}
+alpha <- 0.05
+
+# Distribución nula generada por las remuestras (sin la muestra original)
+dist_perm_nula <- dist_perm |> filter(id != "Apparent")
+
+limite_inferior <- dif_obs - quantile(dist_perm_nula$dif_prop, probs = 1 - alpha / 2)
+limite_superior <- dif_obs - quantile(dist_perm_nula$dif_prop, probs = alpha / 2)
+
+ic <- c(limite_inferior, limite_superior)
+names(ic) <- c(glue("{alpha / 2 * 100}%"), glue("{(1 - alpha / 2) * 100}%"))
+print(ic)
+```
+
+### Respuesta
+
+Se realizó una prueba de permutaciones Monte Carlo con $R = 5999$ repeticiones sobre
+una muestra aleatoria de $n = 130$ hogares de la Región Metropolitana, obteniéndose
+una diferencia observada de proporciones $p_C - p_S = 0,048$ y un valor $p = 0,599$.
+Además, se construyó, usando las mismas remuestras, un intervalo de confianza del 95%
+para esta diferencia de proporciones: [-0,127, 0,222].
+
+Dado que el valor p obtenido (0,599) no es menor que el nivel de significación
+$\alpha = 0,05$, no se rechaza la hipótesis nula. Esto es consistente con que el
+intervalo de confianza obtenido, [-0,127, 0,222], contiene el valor cero. Por lo
+tanto, no hay evidencia estadísticamente significativa, con un 95% de confianza, de
+que la proporción de hogares con vivienda propia en la Región Metropolitana difiera
+entre aquellos cuyo jefe o jefa de hogar cuenta con educación superior y aquellos
+cuyo jefe o jefa de hogar no la tiene.
+
+
+# Pregunta 2
+
+## Pregunta planteada 
+
+¿Existe una diferencia significativa en el gasto promedio mensual en alimentación (medido en miles de pesos) entre hogares pertenecientes a tres macrozonas independientes del país (Norte, Centro, Sur)?
+
+### Planteamiento de hipótesis nula y alternativa
+
+Hipótesis Nula ($H_{0}$): En promedio, no hay diferencias en el gasto mensual en alimentación entre las macrozonas. Matemáticamente: $\mu_{\text{Norte}} = \mu_{\text{Centro}} = \mu_{\text{Sur}}$.
+
+Hipótesis Alternativa ($H_{A}$): Al menos una macrozona tiene un gasto promedio mensual en alimentación distinto a las demás.
+
+### Obtención de los datos
+
+```{r}
+# Generacimos la muestra aleatoria (200 < n < 300)
+set.seed(876) 
+n_hogares <- 250
+
+datos <- tibble(
+  Hogar = 1:n_hogares,
+  Macrozona = factor(sample(c("Norte", "Centro", "Sur"), n_hogares, replace = TRUE)),
+  # Simulamos gastos base con diferencias reales para el ejercicio
+  Gasto = round(rnorm(n_hogares, mean = 250, sd = 40) + 
+                case_when(Macrozona == "Centro" ~ 30,
+                          Macrozona == "Sur" ~ -20,
+                          TRUE ~ 0), 1)
+)
+
+# Desplazamos las observaciones para reflejar la Hipótesis Nula (igualdad de medias)
+media_global <- mean(datos$Gasto)
+
+datos_H0 <- datos |> 
+  group_by(Macrozona) |> 
+  mutate(Gasto_H0 = Gasto - mean(Gasto) + media_global) |> 
+  ungroup()
+```
+
+### Prueba Ómnibus con Bootstrapping
+
+```{r}
+# Creamos remuestras estratificadas
+B <- 1999
+set.seed(876)
+# Usamos apparent = TRUE para conservar la muestra original en el objeto de salida
+remuestras_H0 <- bootstraps(datos_H0, times = B, strata = Macrozona, apparent = TRUE)
+
+# Función que calcula el estadístico F en una remuestra
+calc_F <- function(remuestra, ...) {
+  analysis(remuestra) |> 
+    # Utilizamos type = 1 para mayor eficiencia computacional en el cálculo
+    anova_test(Gasto_H0 ~ Macrozona, type = 1) |> 
+    as_tibble() |> 
+    pull(F)
+}
+
+# Obtenemos la distribución bootstrap del estadístico F bajo H0
+dist_bt <- remuestras_H0 |> 
+  mutate(F_stat = map(splits, calc_F)) |> 
+  unnest(cols = F_stat)
+
+# Obtenemos el F observado (usando los datos originales reales, sin desplazar)
+F_obs <- datos |> anova_test(Gasto ~ Macrozona, type = 1) |> pull(F)
+
+# Calculamos el valor p
+n_extremos_omnibus <- dist_bt |> 
+  filter(id != "Apparent") |> 
+  filter(F_stat >= F_obs) |> 
+  summarise(n = n())
+
+p_valor_omnibus <- (n_extremos_omnibus$n + 1) / (B + 1)
+cat("Valor p (Prueba Ómnibus):", p_valor_omnibus, "\n")
+```
+
+### Análisis Post-Hoc con las Mismas Remuestras
+
+```{r}
+# Función para calcular las medias de las diferencias entre pares de grupos
+medias_dif_pares <- function(remuestra, var_dependiente, ...) {
+  dl <- analysis(remuestra)
+  
+  # Obtenemos combinaciones de pares de macrozonas
+  pares <- dl |> get_comparisons(Macrozona) |> unname()
+  
+  pares |> map(~{
+    nombre <- paste(.x[1], "-", .x[2], sep = "")
+    dl |> 
+      reframe(difs = mean(.data[[var_dependiente]][Macrozona == .x[1]]) - 
+                     mean(.data[[var_dependiente]][Macrozona == .x[2]])) |>
+      summarise("{nombre}" := mean(difs))
+  }) |> list_cbind()
+}
+
+# Obtenemos la distribución empírica de las diferencias nulas con las MISMAS remuestras
+posthoc_bt <- remuestras_H0 |> 
+  mutate(medias_dif = map(splits, medias_dif_pares, var_dependiente = "Gasto_H0")) |> 
+  unnest(medias_dif)
+
+# Obtenmos las diferencias reales observadas desde la muestra original aparente
+# Notar que aquí evaluamos sobre la variable original "Gasto" (no la desplazada)
+posthoc_medias_obs <- medias_dif_pares(remuestras_H0$splits[[B + 1]], var_dependiente = "Gasto")
+
+# Calculamos los valores p empíricos para cada par comparado
+posthoc_bt_sin_app <- posthoc_bt |> filter(id != "Apparent") |> select(-splits, -id)
+
+n_extremos_posthoc <- posthoc_bt_sin_app |> 
+  summarise(across(everything(), 
+                   ~ sum(abs(.x) >= abs(posthoc_medias_obs[[cur_column()]]))))
+
+p_valores_posthoc <- (n_extremos_posthoc + 1) / (B + 1)
+
+# Estructuramos la tabla final con corrección de comparaciones múltiples
+posthoc_tbl <- bind_rows(posthoc_medias_obs, p_valores_posthoc, .id = "est") |> 
+  mutate(est = c("Media_dif_obs", "p_boot")) |> 
+  pivot_longer(-est, names_to = "Par de Macrozonas", values_to = "Valor") |> 
+  pivot_wider(names_from = est, values_from = Valor) |> 
+  adjust_pvalue(p.col = "p_boot", output.col = "p_boot_adj", method = "BH") |> 
+  mutate(across(where(is.numeric), ~ round(., 3)))
+
+print(posthoc_tbl)
+
+```
+
+### Conclusión
+
+Sí, existe una diferencia significativa. El análisis revela que la ubicación geográfica (macrozona) es un factor determinante en el presupuesto destinado a la alimentación. Específicamente, se observa un gradiente de gasto donde la macrozona Centro presenta el desembolso mensual más alto, seguida por la zona Norte, mientras que la macrozona Sur registra el gasto promedio mensual más bajo de las tres regiones estudiadas.

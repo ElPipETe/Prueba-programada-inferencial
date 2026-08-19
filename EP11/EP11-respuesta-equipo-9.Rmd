@@ -1,0 +1,549 @@
+---
+title: "EP11-respuesta-equipo-9"
+author: "Equipo 9"
+output: html_document
+date: "2026-08-11"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.align = "center")
+```
+
+# Cargamos librerias necesarias
+
+```{r paquetes}
+library(dplyr)
+library(leaps)
+library(caret)
+library(car)
+library(pROC)
+library(ggpubr)
+```
+
+## 1. Definición de la semilla
+
+corresponde a los primeros cinco dígitos del RUN del integrante de mayor edad del equipo
+
+```{r semilla}
+set.seed(21020)
+```
+
+## 2. Carga de datos, cálculo de IMC/EN y selección de la muestra
+
+```{r preparacion_datos}
+# Carga de datos (separador ; y coma decimal)
+datos <- read.csv2("EP09 Datos.csv", stringsAsFactors = TRUE)
+
+# Cálculo del IMC y clasificación del estado nutricional
+datos <- datos %>%
+  mutate(IMC = Weight / ((Height / 100)^2),
+         EN = factor(ifelse(IMC >= 23.2, "Sobrepeso", "Normal"),
+                      levels = c("Normal", "Sobrepeso")))
+table(datos$EN)
+```
+
+```{r seleccion_muestra}
+set.seed(21020)
+
+# Muestra de 100 personas, 50 con sobrepeso y 50 sin sobrepeso
+muestra <- datos %>%
+  group_by(EN) %>%
+  slice_sample(n = 50) %>%
+  ungroup()
+
+table(muestra$EN)
+```
+
+## 3. Modelo de RLM para `Weight` (búsqueda exhaustiva + bootstrapping)
+
+### 3.1 Selección de predictores
+
+```{r seleccion_weight}
+# Búsqueda exhaustiva de subconjuntos de predictores para Weight
+# (se excluyen las variables derivadas IMC y EN, como pide el enunciado)
+predictores_wt <- muestra %>% select(-Weight, -IMC, -EN)
+
+combinaciones <- regsubsets(
+  x = predictores_wt,
+  y = muestra$Weight,
+  nvmax = 8,
+  nbest = 1,
+  method = "exhaustive"
+)
+
+resumen <- summary(combinaciones)
+
+# Se restringe la búsqueda a modelos de entre 2 y 8 predictores
+size <- 2:8
+mejor_size <- size[which.min(resumen$bic[size])]
+mejor_size
+
+# BIC del mejor modelo encontrado
+resumen$bic[mejor_size]
+
+# Predictores del mejor modelo encontrado
+predictores_weight <- names(which(resumen$which[mejor_size, -1]))
+predictores_weight
+
+formula_rlm <- as.formula(paste("Weight ~", paste(predictores_weight, collapse = " + ")))
+formula_rlm
+```
+
+### 3.2 Ajuste del modelo con `caret` usando *bootstrapping*
+
+```{r modelo_weight}
+set.seed(21020)
+
+control_boot <- trainControl(method = "boot", number = 999, savePredictions = TRUE)
+
+modelo_rlm <- train(
+  formula_rlm,
+  data = muestra,
+  method = "lm",
+  trControl = control_boot
+)
+
+modelo_rlm
+summary(modelo_rlm$finalModel)
+
+# Se ajusta el mismo modelo directamente con lm() sobre "muestra"
+# es necesario porque el modelo interno de caret (finalModel) queda
+# asociado a un data.frame temporal ("dat") que solo existe dentro de train(),
+# por lo que las funciones de diagnóstico de car (que usan update()) fallarían
+# si se les pasa directamente modelo_rlm$finalModel
+modelo_rlm_lm <- lm(formula_rlm, data = muestra)
+summary(modelo_rlm_lm)
+```
+
+### 3.3 Bondad de ajuste
+
+```{r diagnostico_weight_residuos}
+mod_wt <- modelo_rlm_lm
+
+cat("Pruebas de curvatura:\n")
+residualPlots(mod_wt, type = "rstandard",
+              id = list(method = "r", n = 3, cex = 0.7, location = "lr"),
+              col = "steelblue", pch = 20, col.quad = "red")
+```
+
+El test de Tukey dio resultados significativos (t = 3,39; p = 0,0007), que en
+general la relación no es del todo lineal. Observando cada predictor por
+separado, cuatro de los siete muestran curvatura: `Waist.Girth`
+(p = 00005), `Calf.Maximum.Girth` (p = 0,0092), `Chest.Girth`
+(p = 00083) y `Knees.diameter` (p = 00362), mientras que los otros tres
+(`Thigh.Girth`, `Age`, `Height`) no muestran curvatura (p > 0.14), por ende
+la condición de linealidad no se cumple del todo, porque perímetros corporales no
+siempre crecen de forma lineal con el peso. El R^2 sigue en
+0,97), pero es un punto débil real del modelo que hay que mencionar, y una
+posible mejora sería agregar algún término cuadrático para esas variables.
+
+```{r diagnostico_weight_independencia}
+set.seed(21020)
+db_wt <- durbinWatsonTest(mod_wt)
+db_wt
+```
+
+DW = 2.199, p = 0.37. Como p > 0.05 no se rechaza independencia,
+así que no hay autocorrelación en los residuos. Esta condición se cumple
+sin problema.
+
+```{r diagnostico_weight_homocedasticidad}
+ncvTest(mod_wt)
+```
+
+$\chi^2(1) = 3.838$, p = 0.0501. Prácticamente en el límite del
+$\alpha = 0.05$, no se rechaza homocedasticidad, pero está tan
+al borde que no se puede descartar del todo cierta heterocedasticidad leve.
+No invalida el modelo, pero es algo a tener presente.
+
+```{r diagnostico_weight_multicolinealidad}
+vif(mod_wt)
+```
+
+Los VIF van de 1,29 (`Age`) a 4,51 (`Waist.Girth`), todos bajo 5 y muy lejos
+de 10. `Waist.Girth` y `Chest.Girth` son los más altos, lo cual tiene
+sentido porque ambas son circunferencias del tronco y están correlacionadas
+entre sí, pero no llegan a ser un problema. No hay multicolinealidad
+relevante.
+
+```{r diagnostico_weight_influencia}
+casos_influyentes_wt <- influencePlot(mod_wt, id = list(cex = 0.7))
+casos_influyentes_wt
+```
+
+Ningún caso pasa el umbral clásico de Cook $D_i 1$ (el más alto es el 94,
+con $D = 0.187$). Con el umbral más exigente $4/n = 0.04$, los casos 62,
+84 y 94 sí quedan por sobre ese valor, así que tienen algo de influencia,
+pero ninguno domina el modelo. No se justifica sacarlos sin revisar antes
+por qué son atípicos.
+
+### 3.4 Generalidad y calidad predictiva
+
+```{r generalidad_weight}
+n_muestra <- nrow(muestra)
+k_predictores <- length(predictores_weight)
+cat("Observaciones:", n_muestra, " | Predictores:", k_predictores,
+    " | Obs. por predictor:", round(n_muestra / k_predictores, 1), "\n")
+```
+
+Con 100 observaciones y 7 predictores da 14,3 observaciones por predictor,
+dentro de la regla de 10-15 aunque en el límite de arriba. La dispersión
+entre las 999 remuestras de bootstrap es baja: $RMSE_{SD} = 0,251$ (un
+10 % del RMSE promedio) y $R^2_{SD} = 0,0084$. Que la variabilidad sea tan
+chica entre remuestras es buena señal de que el modelo es estable y
+generaliza razonablemente bien a pesar del tamaño de muestra ajustado.
+
+```{r calidad_predictiva_weight}
+modelo_rlm$results
+```
+
+El bootstrapping da $RMSE = 2,44$ kg, $R^2 = 0,969$ y $MAE = 1,94$ kg,
+calculados sobre observaciones que no se usaron para ajustar cada remuestra
+(o sea, es una estimación razonable de cómo se comportaría con datos
+nuevos). El peso en la muestra va aproximadamente de 40 a 100 kg, así que
+equivocarse en menos de 2 kg en promedio (MAE) es bastante bueno, del orden
+de 2-5 % de error relativo.
+
+### 3.5 Conclusión del modelo para `Weight`
+
+El modelo (`Weight ~ Knees.diameter + Chest.Girth + Waist.Girth +
+Thigh.Girth + Calf.Maximum.Girth + Age + Height`) cumple casi todas las
+condiciones: no hay autocorrelación, la multicolinealidad es baja y ningún
+caso domina el ajuste. Su punto débil es que la linealidad no se cumple del
+todo (curvatura en 4 de los 7 predictores) y la homocedasticidad queda justo
+en el límite, así que hay que usarlo con esa salvedad — probablemente
+mejoraría agregando algún término cuadrático a las circunferencias. En
+poder predictivo está muy bien: $R^2 \approx 0,97$ tanto en el ajuste como
+en el bootstrapping, con RMSE bajo (≈ 2,4 kg) y estable entre remuestras, lo
+que apunta a que generaliza bien dentro del rango de la muestra.
+
+## 4. Modelo de RLM para `IMC` (RFE, 10 a 20 predictores, maximizando $R^2$, 5x5 CV)
+
+### 4.1 Selección de predictores con RFE
+
+```{r seleccion_imc}
+# Se excluyen Weight, Height, EN e IMC (la variable de salida) según el enunciado
+predictores_imc_df <- muestra %>% select(-Weight, -Height, -EN, -IMC)
+
+set.seed(21020)
+control_rfe_imc <- rfeControl(functions = lmFuncs, method = "repeatedcv",
+                               number = 5, repeats = 5)
+
+rfe_imc <- rfe(
+  x = predictores_imc_df,
+  y = muestra$IMC,
+  sizes = 10:20,
+  rfeControl = control_rfe_imc,
+  metric = "Rsquared"
+)
+
+rfe_imc
+```
+
+`rfe()` agrega automáticamente, además de los tamaños indicados en `sizes`, una
+fila con el modelo que usa **todos** los predictores como referencia. En este
+caso ese modelo completo obtuvo el mejor $R^2$, por lo que
+`rfe()` lo seleccionó por defecto como "Selected" — **ignorando la restricción
+de 10 a 20 predictores pedida en el enunciado**. Por eso se restringe
+manualmente la selección al rango permitido y se usa `update()` para reajustar
+el RFE en ese tamaño, sin necesidad de repetir la búsqueda:
+
+```{r seleccion_imc_size}
+resultados_imc <- rfe_imc$results
+resultados_validos <- resultados_imc[resultados_imc$Variables %in% 10:20, ]
+mejor_size_imc <- resultados_validos$Variables[which.max(resultados_validos$Rsquared)]
+mejor_size_imc
+```
+
+```{r predictores_imc_final}
+# OJO: update(rfe_imc, ...) reajusta el modelo interno pero NO actualiza lo
+# que devuelve predictors(), que sigue mostrando el óptimo global (23
+# variables). Por eso se llama directamente a la función de selección de
+# variables que usa el propio RFE (lmFuncs$selectVar), pidiéndole el tamaño
+# que sí respeta el rango 10-20.
+predictores_imc <- lmFuncs$selectVar(rfe_imc$variables, mejor_size_imc)
+predictores_imc
+length(predictores_imc)
+```
+
+```{r grafico_rfe_imc}
+ggplot(rfe_imc) + theme_pubr()
+```
+
+Según la tabla de resultados de la búsqueda, ese tamaño obtiene
+$R^2 = 0,8371$ en la validación cruzada de 5×5 pliegues ($RMSE = 1,478$;
+$MAE = 1,147$), prácticamente igual al $R^2 = 0,840$ que se obtenía usando
+las 23 variables completas — casi todo el poder explicativo ya se alcanza
+con 18 variables.
+
+
+### 4.2 Ajuste del modelo final
+
+```{r modelo_imc}
+formula_imc <- as.formula(paste("IMC ~", paste(predictores_imc, collapse = " + ")))
+formula_imc
+
+set.seed(21020)
+control_imc <- trainControl(method = "repeatedcv", number = 5, repeats = 5,
+                             savePredictions = TRUE)
+
+modelo_imc <- train(formula_imc, data = muestra, method = "lm",
+                     trControl = control_imc)
+
+modelo_imc
+summary(modelo_imc$finalModel)
+
+# Igual que en el modelo de Weight, se ajusta el modelo directamente con lm()
+# sobre "muestra" para poder usar las funciones de diagnóstico de car sin
+# problemas de alcance con el entorno interno de caret.
+modelo_imc_lm <- lm(formula_imc, data = muestra)
+summary(modelo_imc_lm)
+```
+
+### 4.3 Bondad de ajuste
+
+```{r diagnostico_imc_residuos}
+mod_imc <- modelo_imc_lm
+
+cat("Pruebas de curvatura:\n")
+residualPlots(mod_imc, type = "rstandard",
+              id = list(method = "r", n = 3, cex = 0.7, location = "lr"),
+              col = "steelblue", pch = 20, col.quad = "red")
+```
+
+```{r diagnostico_imc_independencia}
+set.seed(21020)
+durbinWatsonTest(mod_imc)
+```
+
+```{r diagnostico_imc_homocedasticidad}
+ncvTest(mod_imc)
+```
+
+```{r diagnostico_imc_multicolinealidad}
+vif(mod_imc)
+```
+
+Con el modelo de 18 predictores, algunos VIF superan el umbral de 10 debido a la alta correlación natural entre las circunferencias corporales: Forearm.Girth (25.24), Bicep.Girth (17.72) y Wrist.Minimum.Girth (11.27). El resto de las variables se mantienen por debajo de 10 (destacando Elbows.diameter con 8.35 y Waist.Girth con 7.17). Esto debe señalarse como una limitación del modelo, ya que los coeficientes individuales de estas variables específicas pierden confiabilidad, aunque el conjunto mantenga una adecuada capacidad predictiva.
+
+```{r diagnostico_imc_influencia}
+influencePlot(mod_imc, id = list(cex = 0.7))
+```
+
+### 4.4 Generalidad y calidad predictiva
+
+```{r generalidad_imc}
+n_imc <- nrow(muestra)
+k_imc <- length(predictores_imc)
+cat("Observaciones:", n_imc, " | Predictores:", k_imc,
+    " | Obs. por predictor:", round(n_imc / k_imc, 1), "\n")
+
+modelo_imc$results
+```
+
+Con 100 observaciones y 18 predictores da solo 5,6 observaciones por
+predictor, bastante bajo el mínimo de 10-15. Hay riesgo real de sobreajuste.
+Igual, la dispersión del RMSE entre las 25 combinaciones de
+pliegues/repeticiones (según la tabla del RFE para tamaño 18) es
+$RMSE_{SD} = 0,1825$, cerca del 12 % del RMSE — dispersión moderada, ni
+muy alta ni despreciable. O sea, el modelo parece razonablemente estable
+dentro de esta muestra, pero generaliza con más incertidumbre que el de
+`Weight` (que tenía mejor razón obs/predictor, 14,3). Si esto fuera para
+producción, convendría más datos o un modelo más chico — con 14-15
+predictores ya se llega a $R^2 \approx 0,83$, casi lo mismo que con 18.
+
+### 4.5 Conclusión del modelo para `IMC`
+
+El modelo para `IMC` ajusta bien ($R^2 \approx 0,84$ en validación
+cruzada), parecido a usar todas las variables, así que la selección por RFE
+se justifica. Su debilidad principal es la razón observaciones/predictor
+baja (5,6), que sumada a la multicolinealidad esperable entre las variables
+de circunferencia, hace que sea menos confiable para interpretar
+coeficientes individuales que el de `Weight`. Aun así su capacidad
+predictiva sigue siendo buena (RMSE ≈ 1,5 en una escala donde el IMC típico
+ronda 20-30). Falta confirmar los diagnósticos (curvatura, VIF, casos
+influyentes) con el conjunto final de 18 predictores una vez que lo
+vuelvas a correr.
+
+## 5. Modelo de RLog para `EN` (RFE, 2 a 6 predictores, mejor curva ROC, LOOCV)
+
+### 5.1 Selección de predictores con RFE
+
+```{r seleccion_en}
+# Se excluyen Weight, Height e IMC según el enunciado
+predictores_en_df <- muestra %>% select(-Weight, -Height, -IMC, -EN)
+
+set.seed(21020)
+control_rfe_en <- rfeControl(functions = caretFuncs, method = "LOOCV")
+
+rfe_en <- rfe(
+  x = predictores_en_df,
+  y = muestra$EN,
+  sizes = 2:6,
+  rfeControl = control_rfe_en,
+  method = "glm",
+  family = binomial(link = "logit"),
+  metric = "ROC",
+  trControl = trainControl(classProbs = TRUE, summaryFunction = twoClassSummary)
+)
+
+rfe_en
+predictores_en <- predictors(rfe_en)
+predictores_en
+```
+
+```{r grafico_rfe_en}
+ggplot(rfe_en) + theme_pubr()
+```
+
+El RFE se quedó con 6 predictores —el máximo permitido—: `Waist.Girth`,
+`Calf.Maximum.Girth`, `Ankle.Minimum.Girth`, `Shoulder.Girth`,
+`Navel.Girth` y `Knees.diameter`, con AUC = 0,92 en LOOCV. A diferencia de
+lo que pasó con IMC, acá el tamaño 6 sí le ganó al modelo con las 18
+variables completas (exactitud 0,79 vs. 0,76), así que no hubo ningún
+conflicto con la restricción del enunciado.
+
+### 5.2 Ajuste del modelo final
+
+```{r modelo_en}
+formula_en <- as.formula(paste("EN ~", paste(predictores_en, collapse = " + ")))
+formula_en
+
+set.seed(21020)
+control_en <- trainControl(method = "LOOCV", classProbs = TRUE,
+                            summaryFunction = twoClassSummary,
+                            savePredictions = TRUE)
+
+modelo_en <- train(formula_en, data = muestra, method = "glm",
+                    family = binomial(link = "logit"),
+                    trControl = control_en, metric = "ROC")
+
+modelo_en
+summary(modelo_en$finalModel)
+
+# Igual que en los modelos de RLM, se ajusta el modelo directamente con glm()
+# sobre "muestra" para poder usar las funciones de diagnóstico de car (y
+# construir la curva ROC) sin problemas de alcance con el entorno de caret.
+modelo_en_glm <- glm(formula_en, data = muestra, family = binomial(link = "logit"))
+summary(modelo_en_glm)
+```
+
+### 5.3 Curva ROC del modelo final
+
+```{r roc_en}
+probs_en <- predict(modelo_en_glm, type = "response")
+roc_en <- roc(muestra$EN, probs_en, levels = c("Normal", "Sobrepeso"), direction = "<")
+
+g_roc_en <- ggroc(roc_en, color = "steelblue") +
+  geom_abline(intercept = 1, slope = 1, color = "steelblue1", linetype = "dashed") +
+  xlab("Especificidad") + ylab("Sensibilidad") + theme_pubr()
+g_roc_en <- g_roc_en + annotate("text", x = 0.3, y = 0.3,
+                                 label = sprintf("AUC = %.2f", roc_en$auc))
+print(g_roc_en)
+```
+
+### 5.4 Bondad de ajuste
+
+```{r diagnostico_en_residuos}
+mod_en <- modelo_en_glm
+
+residualPlots(mod_en, type = "rstandard", fitted = FALSE,
+              id = list(method = "r", n = 3, cex = 0.7, location = "lr"),
+              col = "steelblue", pch = 20, col.quad = "red")
+```
+
+Ninguna de las seis pruebas de curvatura da significativa (todos los
+$p > 0,17$: `Waist.Girth` 0,33; `Calf.Maximum.Girth` 0,93;
+`Ankle.Minimum.Girth` 0,24; `Shoulder.Girth` 0,37; `Navel.Girth` 0,18;
+`Knees.diameter` 0,60), así que no hay problema de linealidad entre los
+predictores y el logit. Tampoco sale el warning típico de
+`fitted probabilities numerically 0 or 1 occurred`, o sea que no hay
+separación perfecta entre las clases
+
+```{r diagnostico_en_multicolinealidad}
+vif(mod_en)
+```
+
+Todos los VIF están entre 1,43 y 2,15, lejos de cualquier umbral (5 o 10).
+No hay multicolinealidad, lo que tiene sentido porque el RFE combinó
+circunferencias de zonas distintas del cuerpo (cintura, pantorrilla,
+tobillo, hombro, ombligo) más un diámetro óseo, no variables redundantes
+entre sí como pasó con IMC.
+
+```{r diagnostico_en_influencia}
+influencePlot(mod_en, id = list(cex = 0.7))
+```
+
+Los cinco casos señalados (58, 63, 83, 91, 93) tienen distancias de Cook
+bajas (entre 0,026 y 0,189), muy por debajo de 1. El caso 93 es el que más
+resalta (CookD = 0,189) por tener residuo estudentizado alto (2,91) pero
+apalancamiento bajo (0,034), o sea es un valor algo atípico pero no está
+"tirando" de la recta de regresión. No hay casos dominando el ajuste.
+
+### 5.5 Generalidad y calidad predictiva
+
+```{r generalidad_en}
+n_en <- nrow(muestra)
+k_en <- length(predictores_en)
+cat("Observaciones:", n_en, " | Predictores:", k_en,
+    " | Obs. por predictor:", round(n_en / k_en, 1), "\n")
+
+modelo_en$results
+
+# Matriz de confusión con las predicciones LOOCV guardadas
+preds_en <- modelo_en$pred
+mat_conf_en <- confusionMatrix(preds_en$pred, preds_en$obs, positive = "Sobrepeso")
+mat_conf_en
+```
+
+Con 100 observaciones y 6 predictores da 16,7 observaciones por predictor,
+la mejor razón de los tres modelos y por sobre la regla de 10-15. LOOCV da
+$AUC = 0,917$, sensibilidad 0,88 y especificidad 0,84 (en LOOCV cada
+predicción se hace dejando esa observación fuera del ajuste, así que es una
+estimación bastante honesta de cómo funcionaría con datos nuevos). La
+matriz de confusión, también con las predicciones de LOOCV, da 86 % de
+exactitud (IC 95%: 77,6-92,1 %), con 8 falsos negativos y 6 falsos
+positivos de 100 casos, y Kappa = 0,72. Con esos números —buena razón
+obs/predictor, LOOCV con poca varianza esperada, y métricas altas— el
+modelo parece generalizar bien.
+
+### 5.6 Conclusión del modelo para `EN`
+
+El clasificador para `EN` es el más confiable de los tres: cumple
+linealidad, no hay separación perfecta, no hay multicolinealidad y ningún
+caso domina el ajuste. Además tiene la mejor razón observaciones/predictor
+(16,7) de los tres modelos. El poder predictivo también es bueno: AUC =
+0,92, exactitud 86 %, sensibilidad 88 % y especificidad 84 % en LOOCV, o sea
+distingue bien entre personas con y sin sobrepeso usando solo 6 medidas
+corporales (sin usar Peso, Estatura ni IMC, como pedía el enunciado).
+
+## 6. Confiabilidad y poder predictivo de los modelos obtenidos
+
+**Confiabilidad.** El modelo de `EN` es el más sólido de los tres, sin
+ninguna condición violada. El de `Weight` tiene una falla real: curvatura
+significativa en 4 de sus 7 predictores (Tukey $p = 0,0007$) y
+homocedasticidad justo en el límite ($p = 0,050$), aunque sin
+autocorrelación ni multicolinealidad. El de `IMC` es el más débil de los
+tres: con las 23 variables (antes del segundo arreglo) había VIF sobre 10
+en seis predictores, y aunque la corrección a 18 debería mejorar eso, sigue
+siendo el más riesgoso en este aspecto — falta confirmarlo con los VIF
+reales una vez corregido.
+
+**Generalidad.** La razón observaciones/predictor está bien para `EN`
+(16,7) y para `Weight` (14,3, en el límite de arriba), pero es insuficiente
+para `IMC` (5,6), que es el que tiene más riesgo de sobreajuste. La
+estabilidad entre remuestras/pliegues es alta en `Weight` (RMSE_SD ≈ 10 %
+del RMSE) y moderada en `IMC` (≈ 12 %).
+
+**Poder predictivo.** Los tres modelos rinden bien en datos que no se
+usaron para construirlos: `Weight` llega a $R^2 = 0,97$ (RMSE ≈ 2,4 kg,
+error chico para el rango típico de peso), `IMC` llega a $R^2 \approx 0,84$
+(RMSE ≈ 1,5, también un error chico para el rango de IMC) y `EN` llega a
+$AUC = 0,92$ con 86 % de exactitud.
+
+En resumen, los tres tienen un poder predictivo parecido y alto, pero
+difieren en confiabilidad: `EN` se puede usar tal cual, `Weight` sirve con
+la salvedad de la curvatura, e `IMC` —aun con la corrección al rango de
+10-20 predictores— hay que tomarlo con más cautela por la razón
+observaciones/predictor baja y la multicolinealidad esperable entre tantas
+medidas corporales relacionadas.

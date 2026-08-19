@@ -1,0 +1,1205 @@
+---
+title: "EP09"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r configuracion, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center"
+)
+
+options(
+  digits = 4,
+  scipen = 999
+)
+
+if (!requireNamespace("car", quietly = TRUE)) {
+  stop("Se requiere el paquete 'car' para ejecutar los diagnósticos.")
+}
+
+library(car)
+
+# Funciones auxiliares utilizadas a lo largo del informe
+formatear_numero <- function(x, digitos = 4) {
+  formatC(x, format = "f", digits = digitos)
+}
+
+formatear_p <- function(x) {
+  format.pval(x, digits = 3, eps = 0.001)
+}
+
+crear_ecuacion <- function(modelo, respuesta) {
+  b <- coef(modelo)
+
+  ecuacion <- paste0(
+    respuesta,
+    " = ",
+    formatear_numero(b[1])
+  )
+
+  if (length(b) > 1) {
+    for (i in 2:length(b)) {
+      signo <- ifelse(b[i] >= 0, " + ", " - ")
+
+      ecuacion <- paste0(
+        ecuacion,
+        signo,
+        formatear_numero(abs(b[i])),
+        " * ",
+        names(b)[i]
+      )
+    }
+  }
+
+  ecuacion
+}
+
+redondear_lambda <- function(lambda) {
+  escalera <- c(-2, -1, -0.5, 0, 0.5, 1, 2)
+  escalera[which.min(abs(escalera - lambda))]
+}
+
+transformar_respuesta <- function(y, lambda) {
+  if (lambda == 0) {
+    return(log(y))
+  }
+
+  if (lambda < 0) {
+    return(-(y^lambda))
+  }
+
+  y^lambda
+}
+
+invertir_transformacion <- function(estimacion, lambda) {
+  if (lambda == 0) {
+    return(exp(estimacion))
+  }
+
+  if (lambda < 0) {
+    if (any(estimacion >= 0)) {
+      stop(
+        "La transformación inversa no puede aplicarse porque existen ",
+        "estimaciones no negativas para un lambda negativo."
+      )
+    }
+
+    return((-estimacion)^(1 / lambda))
+  }
+
+  estimacion^(1 / lambda)
+}
+
+etiqueta_transformacion <- function(lambda) {
+  if (lambda == 1) {
+    return("Weight")
+  }
+
+  if (lambda == 0) {
+    return("log(Weight)")
+  }
+
+  if (lambda == -1) {
+    return("-1 / Weight")
+  }
+
+  if (lambda == -2) {
+    return("-1 / Weight^2")
+  }
+
+  if (lambda == -0.5) {
+    return("-1 / sqrt(Weight)")
+  }
+
+  if (lambda == 0.5) {
+    return("sqrt(Weight)")
+  }
+
+  if (lambda == 2) {
+    return("Weight^2")
+  }
+
+  paste0("Transformación de Weight con lambda = ", lambda)
+}
+
+seleccionar_adiciones <- function(
+  respuesta,
+  predictor_fijo,
+  candidatos,
+  datos_modelo,
+  minimo = 2,
+  maximo = 5
+) {
+  combinaciones <- list()
+
+  for (cantidad in minimo:maximo) {
+    combinaciones <- c(
+      combinaciones,
+      combn(candidatos, cantidad, simplify = FALSE)
+    )
+  }
+
+  modelos <- vector("list", length(combinaciones))
+
+  tabla <- data.frame(
+    Numero_adiciones = integer(length(combinaciones)),
+    Variables_agregadas = character(length(combinaciones)),
+    R2_ajustado = numeric(length(combinaciones)),
+    AIC = numeric(length(combinaciones)),
+    BIC = numeric(length(combinaciones)),
+    stringsAsFactors = FALSE
+  )
+
+  for (i in seq_along(combinaciones)) {
+    variables_modelo <- c(
+      predictor_fijo,
+      combinaciones[[i]]
+    )
+
+    formula_modelo <- reformulate(
+      variables_modelo,
+      response = respuesta
+    )
+
+    modelos[[i]] <- lm(
+      formula_modelo,
+      data = datos_modelo
+    )
+
+    resumen <- summary(modelos[[i]])
+
+    tabla$Numero_adiciones[i] <- length(combinaciones[[i]])
+    tabla$Variables_agregadas[i] <- paste(
+      combinaciones[[i]],
+      collapse = ", "
+    )
+    tabla$R2_ajustado[i] <- resumen$adj.r.squared
+    tabla$AIC[i] <- AIC(modelos[[i]])
+    tabla$BIC[i] <- BIC(modelos[[i]])
+  }
+
+  mejor_indice <- which.min(tabla$BIC)
+
+  list(
+    tabla = tabla[order(tabla$BIC), ],
+    modelo = modelos[[mejor_indice]],
+    adiciones = combinaciones[[mejor_indice]],
+    indice = mejor_indice
+  )
+}
+
+evaluar_supuestos <- function(modelo, nombre, semilla_dw) {
+  normalidad <- shapiro.test(resid(modelo))
+  homocedasticidad <- ncvTest(modelo)
+
+  set.seed(semilla_dw)
+  independencia <- durbinWatsonTest(modelo)
+
+  data.frame(
+    Modelo = nombre,
+    Shapiro_W = unname(normalidad$statistic),
+    Shapiro_p = normalidad$p.value,
+    NCV_Chi2 = homocedasticidad$ChiSquare,
+    NCV_p = homocedasticidad$p,
+    Durbin_Watson = independencia$dw,
+    DW_p = independencia$p,
+    row.names = NULL
+  )
+}
+
+obtener_casos_revision <- function(modelo) {
+  residuos <- rstudent(modelo)
+  apalancamiento <- hatvalues(modelo)
+  cook <- cooks.distance(modelo)
+
+  limite_apalancamiento <- 2 * mean(apalancamiento)
+  limite_cook <- qf(
+    0.5,
+    length(coef(modelo)),
+    df.residual(modelo)
+  )
+
+  tabla <- data.frame(
+    Caso = rownames(model.frame(modelo)),
+    Residuo_estudentizado = residuos,
+    Apalancamiento = apalancamiento,
+    Distancia_Cook = cook,
+    Atipico = abs(residuos) > 2,
+    Alto_apalancamiento =
+      apalancamiento > limite_apalancamiento,
+    Influyente_Cook = cook > limite_cook,
+    row.names = NULL
+  )
+
+  tabla[
+    tabla$Atipico |
+      tabla$Alto_apalancamiento |
+      tabla$Influyente_Cook,
+  ]
+}
+
+metricas_prediccion <- function(observado, predicho) {
+  error <- observado - predicho
+
+  data.frame(
+    RMSE_kg = sqrt(mean(error^2)),
+    MAE_kg = mean(abs(error)),
+    R2_predictivo =
+      1 -
+      sum(error^2) /
+      sum((observado - mean(observado))^2)
+  )
+}
+```
+
+# Preparación de los datos
+
+El archivo `EP09 Datos.csv` debe encontrarse en la misma carpeta que este documento.
+
+```{r cargar-datos}
+datos <- read.csv2(
+  "EP09 Datos.csv",
+  stringsAsFactors = FALSE,
+  check.names = TRUE
+)
+
+dim(datos)
+head(datos)
+str(datos)
+sum(is.na(datos))
+table(datos$Gender)
+```
+
+La matriz contiene `r nrow(datos)` observaciones y `r ncol(datos)` variables. Se verificó que contiene `r sum(is.na(datos))` valores faltantes.
+
+# Pregunta 1
+
+**Definir la semilla a utilizar, correspondiente a los últimos cuatro dígitos del RUN, sin considerar el dígito verificador, del integrante de menor edad del equipo.**
+
+```{r pregunta-1}
+semilla <- 5282
+set.seed(semilla)
+
+semilla
+```
+
+La semilla utilizada es **5282**.
+
+# Pregunta 2
+
+**Seleccionar una muestra aleatoria de 100 mujeres si la semilla es par, o 100 hombres si la semilla es impar, y separar 70 casos para la construcción de modelos y 30 para su evaluación en datos no vistos.**
+
+Como la semilla es par, se trabaja con mujeres. En esta matriz, `Gender = 0` identifica a las mujeres.
+
+```{r pregunta-2}
+mujeres <- datos[datos$Gender == 0, ]
+
+indices_muestra <- sample(
+  seq_len(nrow(mujeres)),
+  size = 100,
+  replace = FALSE
+)
+
+muestra <- mujeres[indices_muestra, ]
+
+indices_construccion <- sample(
+  seq_len(nrow(muestra)),
+  size = 70,
+  replace = FALSE
+)
+
+construccion <- muestra[indices_construccion, ]
+evaluacion <- muestra[-indices_construccion, ]
+
+data.frame(
+  Conjunto = c("Muestra total", "Construcción", "Evaluación"),
+  Numero_de_casos = c(
+    nrow(muestra),
+    nrow(construccion),
+    nrow(evaluacion)
+  )
+)
+
+table(muestra$Gender)
+```
+
+Se seleccionaron `r nrow(muestra)` mujeres. De ellas, `r nrow(construccion)` se utilizan para construir y revisar los modelos, mientras que `r nrow(evaluacion)` se mantienen completamente apartadas para evaluar su poder predictivo.
+
+# Pregunta 3
+
+**Seleccionar de forma aleatoria ocho posibles variables predictoras, sin considerar la estatura.**
+
+Se excluyen `Weight`, porque es la respuesta; `Height`, porque el enunciado prohíbe utilizar la estatura; y `Gender`, porque queda constante al trabajar solamente con mujeres.
+
+```{r pregunta-3}
+variables_candidatas <- setdiff(
+  names(datos),
+  c("Weight", "Height", "Gender")
+)
+
+predictoras_sorteadas <- sample(
+  variables_candidatas,
+  size = 8,
+  replace = FALSE
+)
+
+predictoras_sorteadas
+```
+
+Las ocho variables seleccionadas aleatoriamente son: `r paste(predictoras_sorteadas, collapse = ", ")`.
+
+# Pregunta 4
+
+**Seleccionar, de las otras variables, una que el equipo considere útil para predecir `Weight`, sin considerar la estatura, y justificar la selección.**
+
+Las ocho variables sorteadas quedan reservadas para buscar predictores adicionales en la pregunta 6. Por ello, el predictor de la RLS se selecciona entre las demás variables candidatas.
+
+```{r pregunta-4-correlaciones}
+variables_restantes <- setdiff(
+  variables_candidatas,
+  predictoras_sorteadas
+)
+
+correlaciones_restantes <- sapply(
+  variables_restantes,
+  function(variable) {
+    cor(
+      construccion[[variable]],
+      construccion$Weight,
+      method = "pearson"
+    )
+  }
+)
+
+tabla_correlaciones <- data.frame(
+  Variable = names(correlaciones_restantes),
+  Correlacion = as.numeric(correlaciones_restantes),
+  Correlacion_absoluta =
+    abs(as.numeric(correlaciones_restantes)),
+  row.names = NULL
+)
+
+tabla_correlaciones <- tabla_correlaciones[
+  order(
+    tabla_correlaciones$Correlacion_absoluta,
+    decreasing = TRUE
+  ),
+]
+
+knitr::kable(
+  tabla_correlaciones,
+  digits = 4,
+  row.names = FALSE,
+  caption = paste(
+    "Correlación de Weight con las",
+    length(variables_restantes),
+    "variables no sorteadas."
+  )
+)
+```
+
+Se selecciona la variable con la correlación lineal absoluta más alta, siempre utilizando únicamente los 70 datos de construcción.
+
+```{r pregunta-4-seleccion}
+predictor_rls <- tabla_correlaciones$Variable[1]
+correlacion_rls <- tabla_correlaciones$Correlacion[1]
+
+predictor_rls
+correlacion_rls
+```
+
+La variable elegida es **`r predictor_rls`**, cuya correlación con `Weight` es \(r =\) `r formatear_numero(correlacion_rls, 3)`. Entre las variables no sorteadas, es la que presenta la asociación lineal de mayor magnitud con el peso. Además, el gráfico permite revisar que la asociación no se deba solamente a una observación aislada y que una recta sea una primera aproximación razonable.
+
+```{r pregunta-4-grafico, fig.width=7, fig.height=5}
+plot(
+  construccion[[predictor_rls]],
+  construccion$Weight,
+  xlab = predictor_rls,
+  ylab = "Weight [kg]",
+  main = paste("Weight según", predictor_rls),
+  pch = 19,
+  col = "steelblue"
+)
+
+abline(
+  lm(
+    reformulate(
+      predictor_rls,
+      response = "Weight"
+    ),
+    data = construccion
+  ),
+  col = "firebrick",
+  lwd = 2
+)
+```
+
+# Pregunta 5
+
+**Usando el entorno R y paquetes estándares, construir un modelo de regresión lineal simple con el predictor seleccionado en la pregunta anterior.**
+
+```{r pregunta-5-modelo}
+formula_rls_original <- reformulate(
+  predictor_rls,
+  response = "Weight"
+)
+
+modelo_rls_original <- lm(
+  formula_rls_original,
+  data = construccion
+)
+
+resumen_rls_original <- summary(modelo_rls_original)
+
+resumen_rls_original
+confint(modelo_rls_original)
+```
+
+La ecuación de la RLS en la escala original es:
+
+**`r crear_ecuacion(modelo_rls_original, "Weight estimado")`**
+
+El predictor tiene un valor \(p =\) `r formatear_p(coef(resumen_rls_original)[2, 4])`. El modelo presenta \(R^2 =\) `r formatear_numero(resumen_rls_original$r.squared)` y \(R^2\) ajustado \(=\) `r formatear_numero(resumen_rls_original$adj.r.squared)`.
+
+```{r pregunta-5-grafico, fig.width=7, fig.height=5}
+plot(
+  construccion[[predictor_rls]],
+  construccion$Weight,
+  xlab = predictor_rls,
+  ylab = "Weight [kg]",
+  main = "Regresión lineal simple",
+  pch = 19,
+  col = "steelblue"
+)
+
+abline(
+  modelo_rls_original,
+  col = "firebrick",
+  lwd = 2
+)
+```
+
+# Pregunta 6
+
+**Buscar entre dos y cinco predictores de las ocho variables sorteadas en la pregunta 3 para agregarlos al modelo de RLS obtenido en la pregunta 5 y construir una RLM.**
+
+Para respetar literalmente la instrucción, el predictor de la RLS se mantiene fijo. Se examinan todos los subconjuntos posibles de entre dos y cinco variables sorteadas y se selecciona el modelo con el menor BIC. Así se controla la complejidad y se mantiene un modelo parsimonioso.
+
+```{r pregunta-6-seleccion}
+seleccion_rlm_original <- seleccionar_adiciones(
+  respuesta = "Weight",
+  predictor_fijo = predictor_rls,
+  candidatos = predictoras_sorteadas,
+  datos_modelo = construccion,
+  minimo = 2,
+  maximo = 5
+)
+
+tabla_seleccion_original <-
+  seleccion_rlm_original$tabla
+
+knitr::kable(
+  head(tabla_seleccion_original, 15),
+  digits = 4,
+  row.names = FALSE,
+  caption = paste(
+    "Quince mejores modelos según BIC.",
+    "El predictor de la RLS permanece en todos los modelos."
+  )
+)
+```
+
+```{r pregunta-6-modelo}
+adiciones_rlm_original <-
+  seleccion_rlm_original$adiciones
+
+# Volver a ajustar el modelo en el entorno principal del documento.
+# Esto permite que las funciones de diagnóstico encuentren la fórmula
+# y los datos cuando internamente actualizan el modelo.
+formula_rlm_original <- reformulate(
+  c(
+    predictor_rls,
+    adiciones_rlm_original
+  ),
+  response = "Weight"
+)
+
+modelo_rlm_original <- lm(
+  formula_rlm_original,
+  data = construccion
+)
+
+resumen_rlm_original <-
+  summary(modelo_rlm_original)
+
+adiciones_rlm_original
+resumen_rlm_original
+```
+
+Las variables agregadas a **`r predictor_rls`** son: **`r paste(adiciones_rlm_original, collapse = ", ")`**.
+
+La ecuación de la RLM inicial es:
+
+**`r crear_ecuacion(modelo_rlm_original, "Weight estimado")`**
+
+El modelo tiene `r length(attr(terms(modelo_rlm_original), "term.labels"))` predictores en total, un \(R^2\) ajustado de `r formatear_numero(resumen_rlm_original$adj.r.squared)` y un BIC de `r formatear_numero(BIC(modelo_rlm_original))`.
+
+```{r pregunta-6-comparacion}
+anova(modelo_rls_original, modelo_rlm_original)
+
+data.frame(
+  Modelo = c("RLS original", "RLM original"),
+  R2_ajustado = c(
+    resumen_rls_original$adj.r.squared,
+    resumen_rlm_original$adj.r.squared
+  ),
+  AIC = c(
+    AIC(modelo_rls_original),
+    AIC(modelo_rlm_original)
+  ),
+  BIC = c(
+    BIC(modelo_rls_original),
+    BIC(modelo_rlm_original)
+  )
+)
+```
+
+# Pregunta 7
+
+**Evaluar la bondad de ajuste, incluyendo casos atípicos e influyentes, y la generalidad o condiciones de los modelos. Corregirlos en caso de presentar problemas.**
+
+## Diagnóstico de los modelos originales
+
+```{r pregunta-7-supuestos-originales}
+tabla_supuestos_originales <- rbind(
+  evaluar_supuestos(
+    modelo_rls_original,
+    "RLS original",
+    semilla
+  ),
+  evaluar_supuestos(
+    modelo_rlm_original,
+    "RLM original",
+    semilla + 1
+  )
+)
+
+knitr::kable(
+  tabla_supuestos_originales,
+  digits = 4,
+  row.names = FALSE,
+  caption = "Diagnóstico numérico de los modelos originales."
+)
+```
+
+Los gráficos siguientes permiten revisar linealidad, normalidad, dispersión constante de los residuos y observaciones potencialmente influyentes.
+
+```{r pregunta-7-residuos-originales, fig.width=11, fig.height=8}
+par(mfrow = c(2, 2))
+
+plot(
+  fitted(modelo_rls_original),
+  rstandard(modelo_rls_original),
+  xlab = "Valores ajustados",
+  ylab = "Residuos estandarizados",
+  main = "RLS: residuos vs. ajustados",
+  pch = 19
+)
+abline(h = 0, lty = 2)
+
+qqnorm(
+  rstandard(modelo_rls_original),
+  main = "RLS: gráfico Q-Q",
+  ylab = "Residuos estandarizados"
+)
+qqline(
+  rstandard(modelo_rls_original),
+  col = "firebrick",
+  lwd = 2
+)
+
+plot(
+  fitted(modelo_rlm_original),
+  rstandard(modelo_rlm_original),
+  xlab = "Valores ajustados",
+  ylab = "Residuos estandarizados",
+  main = "RLM: residuos vs. ajustados",
+  pch = 19
+)
+abline(h = 0, lty = 2)
+
+qqnorm(
+  rstandard(modelo_rlm_original),
+  main = "RLM: gráfico Q-Q",
+  ylab = "Residuos estandarizados"
+)
+qqline(
+  rstandard(modelo_rlm_original),
+  col = "firebrick",
+  lwd = 2
+)
+
+par(mfrow = c(1, 1))
+```
+
+```{r pregunta-7-curvatura-original, fig.width=10, fig.height=7}
+residualPlots(
+  modelo_rls_original,
+  type = "rstandard",
+  id = FALSE
+)
+
+residualPlots(
+  modelo_rlm_original,
+  type = "rstandard",
+  id = FALSE
+)
+```
+
+## Casos atípicos, apalancamiento e influencia
+
+```{r pregunta-7-casos-originales}
+casos_rls_original <- obtener_casos_revision(
+  modelo_rls_original
+)
+
+casos_rlm_original <- obtener_casos_revision(
+  modelo_rlm_original
+)
+
+cat("Casos que requieren revisión en la RLS original:\n")
+
+if (nrow(casos_rls_original) == 0) {
+  cat("No se detectaron casos que superen los criterios utilizados.\n")
+} else {
+  print(
+    knitr::kable(
+      casos_rls_original,
+      digits = 4,
+      row.names = FALSE
+    )
+  )
+}
+
+cat("\nCasos que requieren revisión en la RLM original:\n")
+
+if (nrow(casos_rlm_original) == 0) {
+  cat("No se detectaron casos que superen los criterios utilizados.\n")
+} else {
+  print(
+    knitr::kable(
+      casos_rlm_original,
+      digits = 4,
+      row.names = FALSE
+    )
+  )
+}
+```
+
+Se consideran observaciones para revisión aquellas con residuo estudentizado absoluto mayor que 2, apalancamiento superior a dos veces su promedio o distancia de Cook superior al cuantil \(F_{0,5}\) usado como referencia. Estos criterios identifican casos que deben examinarse, pero no justifican eliminarlos automáticamente.
+
+```{r pregunta-7-influencia-original, fig.width=10, fig.height=5}
+par(mfrow = c(1, 2))
+
+influencePlot(
+  modelo_rls_original,
+  id = list(n = 4, cex = 0.7),
+  main = "Influencia: RLS original"
+)
+
+influencePlot(
+  modelo_rlm_original,
+  id = list(n = 4, cex = 0.7),
+  main = "Influencia: RLM original"
+)
+
+par(mfrow = c(1, 1))
+```
+
+## Multicolinealidad y tamaño muestral de la RLM
+
+```{r pregunta-7-vif-original}
+vif_original <- vif(modelo_rlm_original)
+
+tabla_vif_original <- data.frame(
+  Predictor = names(vif_original),
+  VIF = as.numeric(vif_original),
+  Tolerancia = 1 / as.numeric(vif_original),
+  row.names = NULL
+)
+
+knitr::kable(
+  tabla_vif_original,
+  digits = 4,
+  row.names = FALSE,
+  caption = "VIF y tolerancia de la RLM original."
+)
+
+casos_por_predictor_original <-
+  nobs(modelo_rlm_original) /
+  length(attr(terms(modelo_rlm_original), "term.labels"))
+
+casos_por_predictor_original
+```
+
+La RLM dispone de `r formatear_numero(casos_por_predictor_original, 2)` casos por predictor. El mayor VIF es `r formatear_numero(max(vif_original), 3)`. Los coeficientes individuales deben interpretarse con cautela cuando los predictores comparten mucha información.
+
+## Corrección mediante transformación de la respuesta
+
+Se aplica una transformación solamente cuando la normalidad o la homocedasticidad del modelo original presenta un valor \(p < 0,05\). `powerTransform()` estima un valor de lambda y este se aproxima a la transformación más cercana de la escalera de potencias estudiada.
+
+```{r pregunta-7-transformaciones}
+problema_rls <-
+  tabla_supuestos_originales$Shapiro_p[1] < 0.05 ||
+  tabla_supuestos_originales$NCV_p[1] < 0.05
+
+problema_rlm <-
+  tabla_supuestos_originales$Shapiro_p[2] < 0.05 ||
+  tabla_supuestos_originales$NCV_p[2] < 0.05
+
+if (problema_rls) {
+  estimacion_lambda_rls <-
+    as.numeric(coef(powerTransform(modelo_rls_original)))[1]
+
+  lambda_rls <- redondear_lambda(
+    estimacion_lambda_rls
+  )
+} else {
+  estimacion_lambda_rls <- 1
+  lambda_rls <- 1
+}
+
+if (problema_rlm) {
+  estimacion_lambda_rlm <-
+    as.numeric(coef(powerTransform(modelo_rlm_original)))[1]
+
+  lambda_rlm <- redondear_lambda(
+    estimacion_lambda_rlm
+  )
+} else {
+  estimacion_lambda_rlm <- 1
+  lambda_rlm <- 1
+}
+
+tabla_transformaciones <- data.frame(
+  Modelo = c("RLS", "RLM"),
+  Presentaba_problema = c(
+    problema_rls,
+    problema_rlm
+  ),
+  Lambda_estimado = c(
+    estimacion_lambda_rls,
+    estimacion_lambda_rlm
+  ),
+  Lambda_utilizado = c(
+    lambda_rls,
+    lambda_rlm
+  ),
+  Transformacion = c(
+    etiqueta_transformacion(lambda_rls),
+    etiqueta_transformacion(lambda_rlm)
+  )
+)
+
+knitr::kable(
+  tabla_transformaciones,
+  digits = 4,
+  row.names = FALSE,
+  caption = "Transformaciones definidas para los modelos finales."
+)
+```
+
+```{r pregunta-7-modelos-finales}
+construccion$Weight_RLS <-
+  transformar_respuesta(
+    construccion$Weight,
+    lambda_rls
+  )
+
+construccion$Weight_RLM <-
+  transformar_respuesta(
+    construccion$Weight,
+    lambda_rlm
+  )
+
+modelo_rls <- lm(
+  reformulate(
+    predictor_rls,
+    response = "Weight_RLS"
+  ),
+  data = construccion
+)
+
+seleccion_rlm_final <- seleccionar_adiciones(
+  respuesta = "Weight_RLM",
+  predictor_fijo = predictor_rls,
+  candidatos = predictoras_sorteadas,
+  datos_modelo = construccion,
+  minimo = 2,
+  maximo = 5
+)
+
+adiciones_rlm <- seleccion_rlm_final$adiciones
+
+# Volver a ajustar la RLM final en el entorno principal.
+formula_rlm <- reformulate(
+  c(
+    predictor_rls,
+    adiciones_rlm
+  ),
+  response = "Weight_RLM"
+)
+
+modelo_rlm <- lm(
+  formula_rlm,
+  data = construccion
+)
+
+summary(modelo_rls)
+summary(modelo_rlm)
+```
+
+La RLS final modela **`r etiqueta_transformacion(lambda_rls)`** y mantiene el predictor **`r predictor_rls`**.
+
+La RLM final modela **`r etiqueta_transformacion(lambda_rlm)`**, mantiene **`r predictor_rls`** e incorpora las variables **`r paste(adiciones_rlm, collapse = ", ")`**. Volver a realizar la búsqueda después de transformar la respuesta evita conservar una selección que solo fuera adecuada en la escala original.
+
+## Revisión de los modelos corregidos
+
+```{r pregunta-7-supuestos-finales}
+tabla_supuestos_finales <- rbind(
+  evaluar_supuestos(
+    modelo_rls,
+    "RLS final",
+    semilla + 2
+  ),
+  evaluar_supuestos(
+    modelo_rlm,
+    "RLM final",
+    semilla + 3
+  )
+)
+
+knitr::kable(
+  tabla_supuestos_finales,
+  digits = 4,
+  row.names = FALSE,
+  caption = "Diagnóstico numérico de los modelos finales."
+)
+```
+
+Para la RLS final, los valores \(p\) son `r formatear_p(tabla_supuestos_finales$Shapiro_p[1])` para normalidad, `r formatear_p(tabla_supuestos_finales$NCV_p[1])` para homocedasticidad y `r formatear_p(tabla_supuestos_finales$DW_p[1])` para independencia.
+
+Para la RLM final, los valores correspondientes son `r formatear_p(tabla_supuestos_finales$Shapiro_p[2])`, `r formatear_p(tabla_supuestos_finales$NCV_p[2])` y `r formatear_p(tabla_supuestos_finales$DW_p[2])`.
+
+```{r pregunta-7-graficos-finales, fig.width=11, fig.height=8}
+par(mfrow = c(2, 2))
+
+plot(
+  fitted(modelo_rls),
+  rstandard(modelo_rls),
+  xlab = "Valores ajustados",
+  ylab = "Residuos estandarizados",
+  main = "RLS final: residuos vs. ajustados",
+  pch = 19
+)
+abline(h = 0, lty = 2)
+
+qqnorm(
+  rstandard(modelo_rls),
+  main = "RLS final: gráfico Q-Q",
+  ylab = "Residuos estandarizados"
+)
+qqline(
+  rstandard(modelo_rls),
+  col = "firebrick",
+  lwd = 2
+)
+
+plot(
+  fitted(modelo_rlm),
+  rstandard(modelo_rlm),
+  xlab = "Valores ajustados",
+  ylab = "Residuos estandarizados",
+  main = "RLM final: residuos vs. ajustados",
+  pch = 19
+)
+abline(h = 0, lty = 2)
+
+qqnorm(
+  rstandard(modelo_rlm),
+  main = "RLM final: gráfico Q-Q",
+  ylab = "Residuos estandarizados"
+)
+qqline(
+  rstandard(modelo_rlm),
+  col = "firebrick",
+  lwd = 2
+)
+
+par(mfrow = c(1, 1))
+```
+
+```{r pregunta-7-casos-finales}
+casos_rls_final <- obtener_casos_revision(
+  modelo_rls
+)
+
+casos_rlm_final <- obtener_casos_revision(
+  modelo_rlm
+)
+
+cat("Casos que requieren revisión en la RLS final:\n")
+
+if (nrow(casos_rls_final) == 0) {
+  cat("No se detectaron casos que superen los criterios utilizados.\n")
+} else {
+  print(
+    knitr::kable(
+      casos_rls_final,
+      digits = 4,
+      row.names = FALSE
+    )
+  )
+}
+
+cat("\nCasos que requieren revisión en la RLM final:\n")
+
+if (nrow(casos_rlm_final) == 0) {
+  cat("No se detectaron casos que superen los criterios utilizados.\n")
+} else {
+  print(
+    knitr::kable(
+      casos_rlm_final,
+      digits = 4,
+      row.names = FALSE
+    )
+  )
+}
+```
+
+```{r pregunta-7-vif-final}
+vif_final <- vif(modelo_rlm)
+
+tabla_vif_final <- data.frame(
+  Predictor = names(vif_final),
+  VIF = as.numeric(vif_final),
+  Tolerancia = 1 / as.numeric(vif_final),
+  row.names = NULL
+)
+
+knitr::kable(
+  tabla_vif_final,
+  digits = 4,
+  row.names = FALSE,
+  caption = "VIF y tolerancia de la RLM final."
+)
+```
+
+En la RLM final, "Waist.Girth" y "Chest.Girth" presentan valores VIF mayores que 5, por lo que existe cierta multicolinealidad. Esto puede afectar la interpretación individual de sus coeficientes. "Waist.Girth" se mantiene porque corresponde al predictor de la RLS y el enunciado pide conservarlo. A pesar de esto, el modelo completo es significativo y logra buenas predicciones.
+
+No se eliminan automáticamente las observaciones señaladas. Las mediciones pertenecen al rango posible del estudio y, mientras no exista evidencia de error de registro ni una distancia de Cook que muestre control excesivo sobre el modelo, corresponde conservarlas y reportar su revisión.
+
+# Pregunta 8
+
+**Evaluar el poder predictivo de los modelos sobre los 30 casos que no participaron en su construcción.**
+
+Las predicciones de ambos modelos se devuelven a kilogramos mediante la transformación inversa correspondiente. La comparación principal se realiza con el RMSE, porque expresa el error en la misma escala del peso.
+
+```{r pregunta-8-predicciones}
+pred_rls_construccion_transformada <- predict(
+  modelo_rls,
+  newdata = construccion
+)
+
+pred_rls_evaluacion_transformada <- predict(
+  modelo_rls,
+  newdata = evaluacion
+)
+
+pred_rlm_construccion_transformada <- predict(
+  modelo_rlm,
+  newdata = construccion
+)
+
+pred_rlm_evaluacion_transformada <- predict(
+  modelo_rlm,
+  newdata = evaluacion
+)
+
+pred_rls_construccion <- invertir_transformacion(
+  pred_rls_construccion_transformada,
+  lambda_rls
+)
+
+pred_rls_evaluacion <- invertir_transformacion(
+  pred_rls_evaluacion_transformada,
+  lambda_rls
+)
+
+pred_rlm_construccion <- invertir_transformacion(
+  pred_rlm_construccion_transformada,
+  lambda_rlm
+)
+
+pred_rlm_evaluacion <- invertir_transformacion(
+  pred_rlm_evaluacion_transformada,
+  lambda_rlm
+)
+
+tabla_metricas <- rbind(
+  cbind(
+    Modelo = "RLS",
+    Conjunto = "Construcción",
+    metricas_prediccion(
+      construccion$Weight,
+      pred_rls_construccion
+    )
+  ),
+  cbind(
+    Modelo = "RLS",
+    Conjunto = "Evaluación",
+    metricas_prediccion(
+      evaluacion$Weight,
+      pred_rls_evaluacion
+    )
+  ),
+  cbind(
+    Modelo = "RLM",
+    Conjunto = "Construcción",
+    metricas_prediccion(
+      construccion$Weight,
+      pred_rlm_construccion
+    )
+  ),
+  cbind(
+    Modelo = "RLM",
+    Conjunto = "Evaluación",
+    metricas_prediccion(
+      evaluacion$Weight,
+      pred_rlm_evaluacion
+    )
+  )
+)
+
+knitr::kable(
+  tabla_metricas,
+  digits = 4,
+  row.names = FALSE,
+  caption = "Calidad predictiva en la escala original del peso."
+)
+```
+
+Al comparar ambos conjuntos, el RMSE aumenta de 4,639 a 5,299 kg en la RLS y de 2,901 a 3,136 kg en la RLM. En la RLM el aumento es pequeño, por lo que no se observa un problema importante de sobreajuste. De todos modos, los resultados solo se pueden generalizar a mujeres similares a las de la muestra.
+
+```{r pregunta-8-rangos}
+predictores_finales <- unique(
+  c(
+    predictor_rls,
+    adiciones_rlm
+  )
+)
+
+tabla_rangos <- data.frame(
+  Variable = predictores_finales,
+  Min_construccion = sapply(
+    construccion[predictores_finales],
+    min
+  ),
+  Max_construccion = sapply(
+    construccion[predictores_finales],
+    max
+  ),
+  Min_evaluacion = sapply(
+    evaluacion[predictores_finales],
+    min
+  ),
+  Max_evaluacion = sapply(
+    evaluacion[predictores_finales],
+    max
+  ),
+  row.names = NULL
+)
+
+tabla_rangos$Evaluacion_dentro_del_rango <- with(
+  tabla_rangos,
+  Min_evaluacion >= Min_construccion &
+    Max_evaluacion <= Max_construccion
+)
+
+knitr::kable(
+  tabla_rangos,
+  digits = 2,
+  row.names = FALSE,
+  caption = paste(
+    "Rangos de los predictores.",
+    "FALSE indica que alguna predicción implica extrapolación."
+  )
+)
+```
+
+```{r pregunta-8-graficos, fig.width=10, fig.height=5}
+par(mfrow = c(1, 2))
+
+plot(
+  evaluacion$Weight,
+  pred_rls_evaluacion,
+  xlab = "Peso observado [kg]",
+  ylab = "Peso predicho [kg]",
+  main = "RLS en datos no vistos",
+  pch = 19,
+  col = "steelblue"
+)
+abline(0, 1, lwd = 2)
+
+plot(
+  evaluacion$Weight,
+  pred_rlm_evaluacion,
+  xlab = "Peso observado [kg]",
+  ylab = "Peso predicho [kg]",
+  main = "RLM en datos no vistos",
+  pch = 19,
+  col = "steelblue4"
+)
+abline(0, 1, lwd = 2)
+
+par(mfrow = c(1, 1))
+```
+
+```{r pregunta-8-conclusion, include=FALSE}
+metricas_rls_evaluacion <- metricas_prediccion(
+  evaluacion$Weight,
+  pred_rls_evaluacion
+)
+
+metricas_rlm_evaluacion <- metricas_prediccion(
+  evaluacion$Weight,
+  pred_rlm_evaluacion
+)
+
+mejor_modelo <- if (
+  metricas_rlm_evaluacion$RMSE_kg <
+    metricas_rls_evaluacion$RMSE_kg
+) {
+  "RLM"
+} else {
+  "RLS"
+}
+```
+
+## Conclusión
+
+Con la semilla 5282 se seleccionó una muestra reproducible de 100 mujeres, dividida en 70 casos de construcción y 30 casos de evaluación.
+
+Las ocho variables sorteadas se reservaron para la exploración del modelo múltiple. Para la RLS se eligió **`r predictor_rls`** entre las otras variables, evitando utilizar la estatura. En la RLM final se mantuvo este predictor y se agregaron **`r paste(adiciones_rlm, collapse = ", ")`**, cumpliendo la exigencia de incorporar entre dos y cinco variables sorteadas.
+
+Los modelos fueron revisados mediante gráficos de residuos, normalidad, homocedasticidad, independencia, VIF, residuos estudentizados, apalancamiento y distancia de Cook. Cuando los diagnósticos originales indicaron problemas, se aplicaron las transformaciones **`r etiqueta_transformacion(lambda_rls)`** para la RLS y **`r etiqueta_transformacion(lambda_rlm)`** para la RLM.
+
+En los 30 casos no vistos, la RLS obtiene un RMSE de **`r formatear_numero(metricas_rls_evaluacion$RMSE_kg, 3)` kg**, mientras que la RLM obtiene **`r formatear_numero(metricas_rlm_evaluacion$RMSE_kg, 3)` kg**. Por este criterio, el modelo con mejor poder predictivo es la **`r mejor_modelo`**.
+
+Las conclusiones se limitan a mujeres semejantes a las incluidas en estos datos y a los rangos observados de los predictores. Los modelos describen asociaciones útiles para predecir, pero no establecen relaciones causales.

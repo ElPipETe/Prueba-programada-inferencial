@@ -1,0 +1,400 @@
+---
+title: "EP08-Estadistica"
+author: "Equipo 1"
+date: "13-07-2026"
+output:
+  html_document:
+    toc: true # Activa la tabla de contenidos (índice)
+    toc_float: true # Permite que el índice se mueva al hacer scroll
+    toc_depth: 3 # Define la cantidad de niveles de títulos
+    theme: flatly # Tema visual (bootstrap)
+    highlight: pygments # Define el estilo del código (colores)
+    df_print: paged # Hace paginado al mostrar data frames
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo      = TRUE, # Muestra código R en el documento
+  # warning   = FALSE, # Oculta advertencias
+  message   = FALSE, # Oculta mensajes (como los de carga de paquetes)
+  fig.align = "center", # Centra imágenes
+  fig.width = 7,
+  fig.height = 4 # Parámetros para el tamaño de gráficas
+)
+
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(tibble)
+```
+
+# Contexto
+
+Como habíamos visto a comienzos del semestre, la Encuesta de Caracterización Socioeconómica Nacional (Casen) es realizada por el Ministerio de Desarrollo Social de forma periódica para conocer la situación de los hogares chilenos con relación a aspectos demográficos, de educación, salud, vivienda, trabajo e ingresos. Es la principal fuente de información para estimar la magnitud de la pobreza y la distribución del ingreso en el país.
+
+Se tiene a disposición un archivo CSV con un subconjunto de los datos obtenidos en la Casen 2017. El equipo debe revisar las columnas disponibles en este archivo según la descripción en el libro de códigos de la encuesta, que también queda disponible para este ejercicio. Es importante notar que en esta encuesta hay datos de carácter colectivo sobre “el hogar” del entrevistado, pero también hay datos de carácter individual, que se refieren “al jefe o la jefa de hogar” (no al entrevistado).
+
+## Lectura de datos
+
+```{r}
+datos_casen <- read.csv(
+  "EP08 Datos CASEN 2017.csv",
+  fileEncoding = "windows-1252"
+)
+
+stopifnot(nrow(datos_casen) == 65535)
+
+head(datos_casen)
+```
+
+# Pregunta 1
+
+Propongan una pregunta de investigación original, que involucre la comparación de la frecuencia en que se observa un evento o característica en dos grupos independientes. Fijando una semilla propia, seleccionen una muestra aleatoria de hogares (100 < n < 150) y respondan la pregunta propuesta utilizando una prueba de permutaciones Monte Carlo. Deben reportar un intervalo de confianza para el estadístico utilizado usando las mismas remuestras.
+
+## Pregunta de investigación
+
+Nos centramos en el estado civil del jefe o la jefa de hogar (`ecivil`) y en el número de hijos nacidos vivos que ha tenido durante su vida (`s4`). A partir de esta última variable definimos el evento "ha tenido al menos un hijo nacido vivo" (`s4 > 0`). La pregunta de investigación es:
+
+¿Difiere la proporción de jefes y jefas de hogar que han tenido al menos un hijo nacido vivo entre quienes están casados(as) y quienes presentan otro estado civil?
+
+El grupo "No casado" reúne las categorías conviviente, conviviente civil, anulado, separado, divorciado, viudo y soltero. El estadístico de interés es la diferencia de proporciones del evento entre los grupos Casado y No casado.
+
+## Datos
+
+```{r}
+# Preparar los datos y seleccionar la muestra
+set.seed(234)
+
+# El libro de códigos identifica 99 como "No sabe". En el CSV no aparece 99,
+# pero sí una concentración anómala en 21, incluso en edades incompatibles con
+# esa cantidad de hijos. Por ello, 21 se trata como una probable recodificación
+# de "No sabe", sin afirmar que la equivalencia esté documentada explícitamente.
+cat("Frecuencias observadas de s4\n")
+print(table(datos_casen$s4, useNA = "ifany"))
+
+datos_p1 <- datos_casen |>
+  filter(!is.na(s4), !(s4 %in% c(21, 99)), !is.na(ecivil)) |>
+  mutate(
+    Estado_civil = factor(
+      if_else(ecivil == "Casado(a)", "Casado", "No casado"),
+      levels = c("Casado", "No casado")
+    ),
+    Tiene_hijos = factor(if_else(s4 > 0, "Sí", "No"), levels = c("Sí", "No"))) |>
+  select(Estado_civil, Tiene_hijos)
+
+n <- 120
+muestra_p1 <- datos_p1 |> slice_sample(n = n)
+
+# Tabla de contingencia y proporciones observadas
+tabla_p1 <- table(muestra_p1$Estado_civil, muestra_p1$Tiene_hijos)
+cat("Tabla de contingencia de la muestra\n")
+print(addmargins(tabla_p1))
+
+cat("\nProporciones por estado civil\n")
+print(round(prop.table(tabla_p1, margin = 1), 4))
+```
+
+Según el libro de códigos, `s4 = 99` corresponde a "No sabe". Aunque ese valor no aparece en el CSV entregado, se observan 684 registros con `s4 = 21`, una proporción muy cercana a la de respuestas "No sabe" informada para la base original, además de casos con edades en que 21 hijos resulta implausible. Por ello, `21` se considera una probable recodificación de `99` y ambos valores se excluyen antes de seleccionar los 120 hogares. Esta decisión evita clasificar respuestas desconocidas como si indicaran que la persona tuvo hijos.
+
+La tabla presenta una celda sin observaciones: ninguno de los 38 jefes o jefas de hogar casados incluidos en la muestra declaró no haber tenido hijos nacidos vivos. En estas condiciones no resulta razonable depender de una aproximación normal para comparar proporciones. Por ello, y siguiendo lo solicitado en el enunciado, se utilizará una prueba de permutaciones Monte Carlo, que construye la distribución nula directamente mediante la reasignación aleatoria de las etiquetas de estado civil.
+
+## Formulación de hipótesis
+
+Sean $p_C$ y $p_N$ las proporciones de jefes y jefas de hogar que han tenido al menos un hijo nacido vivo entre los grupos Casado y No casado, respectivamente. Entonces:
+
+- $H_0$: la proporción es igual en ambos grupos: $p_C - p_N = 0$.
+- $H_A$: la proporción es diferente entre ambos grupos: $p_C - p_N \neq 0$.
+
+## Estadístico de interés
+
+El estadístico de interés es la diferencia observada de proporciones entre el grupo Casado y el grupo No casado:
+
+$\hat{p}_C - \hat{p}_N$.
+
+## Remuestreo
+
+Se mantienen fijos los resultados del evento y se permutan las etiquetas de estado civil, respetando el tamaño original de ambos grupos. En cada permutación se vuelve a calcular $\hat{p}_C - \hat{p}_N$. Se utilizan 9.999 permutaciones para obtener una estimación estable del valor p y reducir la variabilidad propia del procedimiento Monte Carlo.
+
+```{r}
+R <- 9999
+alfa <- 0.05
+evento <- as.integer(muestra_p1$Tiene_hijos == "Sí")
+grupo_casado <- muestra_p1$Estado_civil == "Casado"
+n_casado <- sum(grupo_casado)
+n_no_casado <- sum(!grupo_casado)
+
+p_casado <- mean(evento[grupo_casado])
+p_no_casado <- mean(evento[!grupo_casado])
+dif_obs <- p_casado - p_no_casado
+
+# Cada columna contiene una permutación de las etiquetas de grupo.
+set.seed(235)
+permutaciones_grupo <- replicate(R, sample(grupo_casado, replace = FALSE))
+
+eventos_casado <- colSums(permutaciones_grupo * evento)
+p_casado_perm <- eventos_casado / n_casado
+p_no_casado_perm <- (sum(evento) - eventos_casado) / n_no_casado
+dif_perm <- p_casado_perm - p_no_casado_perm
+
+# Corrección de Monte Carlo: se agrega el resultado observado al numerador.
+p_valor <- (1 + sum(abs(dif_perm) >= abs(dif_obs))) / (R + 1)
+
+dist_perm_tbl <- data.frame(
+  estimate = dif_perm,
+  extremo = abs(dif_perm) >= abs(dif_obs)
+)
+
+ggplot(dist_perm_tbl, aes(x = estimate, fill = extremo)) +
+  geom_histogram(bins = 35, color = "white") +
+  geom_vline(xintercept = c(-dif_obs, dif_obs),
+             color = "steelblue4", linetype = "dashed") +
+  scale_fill_manual(values = c("TRUE" = "steelblue4", "FALSE" = "lightblue"),
+                    guide = "none") +
+  labs(
+    title = paste("Contraste con", R, "permutaciones"),
+    subtitle = sprintf("Diferencia observada = %.4f; p = %.4f", dif_obs, p_valor),
+    x = "Diferencia de proporciones bajo H0",
+    y = "Frecuencia"
+  ) +
+  theme_pubr()
+
+cat("Diferencia observada (Casado - No casado):", round(dif_obs, 4), "\n")
+cat("Valor p bilateral:", round(p_valor, 4), "\n")
+
+# IC por inversión de pruebas: se contrastan valores candidatos delta usando
+# exactamente las mismas asignaciones aleatorias almacenadas arriba.
+superposicion <- colSums(permutaciones_grupo * grupo_casado)
+pendiente_delta <- (n_casado - superposicion) / n_no_casado -
+  superposicion / n_casado
+
+p_para_delta <- function(delta) {
+  dif_perm_delta <- dif_perm + delta * pendiente_delta
+  (1 + sum(abs(dif_perm_delta) >= abs(dif_obs - delta))) / (R + 1)
+}
+
+candidatos <- seq(-1, 1, by = 0.0005)
+p_candidatos <- vapply(candidatos, p_para_delta, numeric(1))
+aceptados <- candidatos[p_candidatos >= alfa]
+ic_perm <- range(aceptados)
+
+# Comprobar que los valores no rechazados forman un intervalo continuo.
+stopifnot(all(diff(aceptados) <= 0.0005 + 1e-10))
+
+cat(sprintf("IC de 95%% por inversión de permutaciones: [%.4f, %.4f]\n",
+            ic_perm[1], ic_perm[2]))
+```
+
+El intervalo no se obtiene tomando directamente los percentiles de la distribución nula, ya que eso produciría solamente un rango de referencia bajo $H_0$. En su lugar, se invierten pruebas bilaterales para distintos valores candidatos de $p_C-p_N$, reutilizando exactamente las mismas permutaciones. Los valores no rechazados forman un intervalo continuo y el valor cero queda fuera de él, de manera coherente con el valor p obtenido.
+
+## Conclusión
+
+El libro de códigos identifica `s4 = 99` como "No sabe". En el CSV no aparece ese código, pero los 684 registros con `s4 = 21`, su proporción cercana a la de "No sabe" en la base original y su presencia en edades incompatibles con 21 hijos indican que probablemente corresponden a una recodificación. Para evitar clasificarlos como "Sí ha tenido hijos", se excluyeron `21` y `99` antes de seleccionar la muestra aleatoria de 120 hogares.
+
+En esta muestra, la proporción de jefes y jefas de hogar que han tenido al menos un hijo nacido vivo fue de 100,0 % entre los casados y de 79,3 % entre los no casados. La diferencia observada fue de 20,7 puntos porcentuales a favor del grupo Casado. La prueba de permutaciones Monte Carlo con 9.999 repeticiones entregó un valor p bilateral de 0,0026. Como $p<\alpha=0,05$, se rechaza la hipótesis nula, manteniéndose la conclusión general del análisis: existe evidencia de una diferencia entre las proporciones de ambos grupos y, en la muestra estudiada, esta es mayor entre quienes están casados.
+
+El intervalo de 95 % obtenido por inversión de las mismas permutaciones fue aproximadamente $[0,0745; 0,3380]$ y no contiene el valor nulo, lo que es coherente con la decisión anterior. Estos resultados muestran una asociación entre el estado civil y haber tenido al menos un hijo nacido vivo, pero no permiten concluir que el estado civil sea la causa de la diferencia.
+
+---
+
+
+# Problema 2
+
+Propongan una pregunta de investigación original, que involucre la comparación de las medias de más de dos grupos independientes (más abajo se dan unos ejemplos). Fijando una semilla distinta a la anterior, seleccionen una muestra aleatoria de hogares (200 < n < 300) y respondan la pregunta propuesta utilizando bootstrapping. Solo por ejercicio académico, aplique un análisis post-hoc con bootstrapping aunque este no fuera necesario. Indicación: consideren que el análisis post-hoc debe hacerse con las mismas remuestras usadas para la prueba ómnibus.
+
+# Respuesta 2
+
+## Pregunta de investigación
+
+¿Difiere el ingreso total corregido promedio del hogar (`ytotcorh`) entre las viviendas cuyo piso presenta un estado de conservación (`v5`) Bueno, Aceptable o Malo?
+
+## Datos
+
+A continuación se fija la semilla 2026 y se seleccionan aleatoriamente 250 hogares, dentro del rango solicitado. Se eliminan previamente las respuestas "No sabe/no responde" de `v5`, pues no corresponden a un estado de conservación. Se revisa la forma de las distribuciones y el tamaño de cada grupo antes del análisis.
+
+```{r}
+# Selección reproducible de la muestra
+set.seed(2026)
+muestra_p2 <- datos_casen |>
+  filter(!is.na(ytotcorh), v5 %in% c("Bueno", "Aceptable", "Malo")) |>
+  transmute(
+    ingreso = ytotcorh,
+    estado_piso = factor(v5, levels = c("Bueno", "Aceptable", "Malo"))
+  ) |>
+  slice_sample(n = 250)
+
+# Descripción de los grupos
+descriptivos_p2 <- muestra_p2 |>
+  group_by(estado_piso) |>
+  summarise(
+    n = n(),
+    media = mean(ingreso),
+    mediana = median(ingreso),
+    sd = sd(ingreso),
+    IQR = IQR(ingreso),
+    .groups = "drop"
+  )
+
+print(descriptivos_p2)
+
+# Diagnóstico gráfico
+ggqqplot(
+  data = muestra_p2,
+  x = "ingreso",
+  facet.by = "estado_piso",
+  color = "estado_piso",
+  xlab = "Cuantil teórico",
+  ylab = "Ingreso total corregido del hogar"
+)
+
+ggplot(muestra_p2, aes(x = estado_piso, y = ingreso, fill = estado_piso)) +
+  geom_boxplot(alpha = 0.8, outlier.alpha = 0.5) +
+  scale_y_continuous(
+    trans = scales::pseudo_log_trans(sigma = 10000),
+    labels = scales::label_number(big.mark = ".", decimal.mark = ",")
+  ) +
+  labs(
+    x = "Estado de conservación del piso",
+    y = "Ingreso total corregido (escala seudologarítmica)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+Los gráficos Q-Q muestran asimetría positiva y desviaciones importantes en las colas, mientras que los diagramas de caja evidencian valores extremos. Además, los tamaños de los grupos son desiguales: 171 hogares tienen piso Bueno, 60 Aceptable y 19 Malo. Estas características hacen poco conveniente depender de la normalidad y de la igualdad de varianzas, por lo que se aplicará bootstrapping manteniendo independientes los remuestreos de cada grupo.
+
+## Formulación de hipótesis
+
+Sean $\mu_B$, $\mu_A$ y $\mu_M$ los ingresos totales corregidos promedio de los hogares con pisos en estado Bueno, Aceptable y Malo, respectivamente:
+
+- $H_0: \mu_B = \mu_A = \mu_M$.
+- $H_A$: al menos una de estas medias poblacionales difiere de las demás; es decir, $\exists\, i,j \in \{B,A,M\}$ tales que $\mu_i \neq \mu_j$.
+
+## Estadístico de interés
+
+La medida de interés es la media aritmética del ingreso en cada grupo. Para el contraste ómnibus se utiliza el estadístico $F_W$ de Welch, que resume las diferencias entre las tres medias considerando sus tamaños y varianzas. Para el post-hoc se utilizan las diferencias de medias de cada par, estandarizadas por su error estándar. La distribución nula de estos estadísticos se obtiene mediante bootstrapping.
+
+## Remuestreo
+
+Se construyen 9.999 remuestras con reposición dentro de cada grupo. Antes de remuestrear, cada grupo se centra en la media general para representar $H_0$, conservando su variabilidad y su tamaño original. Los índices se guardan una sola vez y luego se usan tanto en la prueba ómnibus como en las tres comparaciones post-hoc. En cada remuestra se conserva la comparación estandarizada más extrema; de esta manera se ajustan simultáneamente las comparaciones y se reduce el riesgo de declarar diferencias solo por realizar varias pruebas.
+
+```{r}
+alfa <- 0.05
+B <- 9999
+
+grupos <- split(muestra_p2$ingreso, muestra_p2$estado_piso)
+tamanos <- vapply(grupos, length, integer(1))
+medias_obs <- vapply(grupos, mean, numeric(1))
+varianzas_obs <- vapply(grupos, var, numeric(1))
+media_general <- mean(muestra_p2$ingreso)
+
+# Calcula el estadístico de Welch para una o varias filas de medias y varianzas.
+calcular_F_welch <- function(medias, varianzas, tamanos) {
+  if (is.null(dim(medias))) medias <- matrix(medias, nrow = 1)
+  if (is.null(dim(varianzas))) varianzas <- matrix(varianzas, nrow = 1)
+
+  pesos <- 1 / sweep(varianzas, 2, tamanos, FUN = "/")
+  suma_pesos <- rowSums(pesos)
+  media_ponderada <- rowSums(pesos * medias) / suma_pesos
+  numerador <- rowSums(pesos * (medias - media_ponderada)^2) /
+    (ncol(medias) - 1)
+  ajuste <- rowSums(sweep((1 - pesos / suma_pesos)^2,
+                          2, tamanos - 1, FUN = "/"))
+  denominador <- 1 + 2 * (ncol(medias) - 2) /
+    (ncol(medias)^2 - 1) * ajuste
+
+  numerador / denominador
+}
+
+F_obs <- calcular_F_welch(medias_obs, varianzas_obs, tamanos)
+
+# Centrar cada grupo para generar datos compatibles con H0.
+grupos_h0 <- Map(
+  function(valores, media_grupo) valores - media_grupo + media_general,
+  grupos,
+  medias_obs
+)
+
+# Única colección de índices bootstrap compartida por ómnibus y post-hoc.
+set.seed(2027)
+indices_boot <- lapply(
+  tamanos,
+  function(n_grupo) {
+    matrix(sample.int(n_grupo, B * n_grupo, replace = TRUE),
+           nrow = B, ncol = n_grupo)
+  }
+)
+
+remuestras_h0 <- Map(
+  function(valores, indices) {
+    matrix(valores[indices], nrow = B, ncol = ncol(indices))
+  },
+  grupos_h0,
+  indices_boot
+)
+
+medias_boot <- do.call(cbind, lapply(remuestras_h0, rowMeans))
+varianzas_boot <- do.call(cbind, lapply(remuestras_h0, function(x) {
+  medias_fila <- rowMeans(x)
+  rowSums((x - medias_fila)^2) / (ncol(x) - 1)
+}))
+colnames(medias_boot) <- colnames(varianzas_boot) <- names(grupos)
+
+# Prueba ómnibus bootstrap.
+F_boot <- calcular_F_welch(medias_boot, varianzas_boot, tamanos)
+p_omnibus <- (1 + sum(F_boot >= F_obs)) / (B + 1)
+
+cat(sprintf("Estadístico ómnibus de Welch: %.4f\n", F_obs))
+cat(sprintf("Valor p bootstrap: %.4f\n", p_omnibus))
+
+# Post-hoc con las mismas matrices medias_boot y varianzas_boot.
+pares <- combn(seq_along(grupos), 2)
+nombres_pares <- vapply(seq_len(ncol(pares)), function(j) {
+  paste(names(grupos)[pares[1, j]], names(grupos)[pares[2, j]], sep = " vs. ")
+}, character(1))
+
+diferencias_obs <- vapply(seq_len(ncol(pares)), function(j) {
+  medias_obs[pares[1, j]] - medias_obs[pares[2, j]]
+}, numeric(1))
+
+se_obs <- vapply(seq_len(ncol(pares)), function(j) {
+  i <- pares[1, j]
+  k <- pares[2, j]
+  sqrt(varianzas_obs[i] / tamanos[i] + varianzas_obs[k] / tamanos[k])
+}, numeric(1))
+
+t_obs <- diferencias_obs / se_obs
+t_boot <- sapply(seq_len(ncol(pares)), function(j) {
+  i <- pares[1, j]
+  k <- pares[2, j]
+  (medias_boot[, i] - medias_boot[, k]) /
+    sqrt(varianzas_boot[, i] / tamanos[i] +
+           varianzas_boot[, k] / tamanos[k])
+})
+
+max_t_boot <- apply(abs(t_boot), 1, max, na.rm = TRUE)
+critico_max_t <- quantile(max_t_boot, 1 - alfa, na.rm = TRUE)
+p_ajustados <- vapply(abs(t_obs), function(t) {
+  (1 + sum(max_t_boot >= t)) / (B + 1)
+}, numeric(1))
+
+resultado_posthoc <- data.frame(
+  comparacion = nombres_pares,
+  diferencia_medias = diferencias_obs,
+  IC_95_inf = diferencias_obs - critico_max_t * se_obs,
+  IC_95_sup = diferencias_obs + critico_max_t * se_obs,
+  p_ajustado = p_ajustados
+)
+
+print(resultado_posthoc)
+```
+
+
+## Conclusión
+
+El valor p obtenido en la prueba ómnibus con bootstrapping ($F_W=18,041$; $p<0,001$) es menor que el nivel de significación $\alpha=0,05$, por lo que se rechaza la hipótesis nula. Esto sugiere que existe una diferencia en el ingreso total corregido promedio de al menos uno de los grupos definidos por el estado de conservación del piso.
+
+Luego, el procedimiento post-hoc con bootstrapping, realizado con las mismas remuestras y con ajuste `max-t`, permite afirmar que los hogares con piso en estado Bueno presentan un ingreso promedio mayor que aquellos con piso Aceptable (diferencia de $438.997; IC simultáneo de 95 %: [$166.938; $711.056]; $p_{aj}<0,001$) y que aquellos con piso Malo (diferencia de $660.380; IC: [$397.948; $922.812]; $p_{aj}<0,001$). Entre los hogares con piso Aceptable y Malo no se encontró una diferencia estadísticamente significativa ($p_{aj}=0,087$). Esta última comparación debe interpretarse con cautela porque el grupo Malo contiene solamente 19 hogares. Los resultados muestran una asociación, pero no permiten concluir que el estado del piso sea la causa de las diferencias de ingreso.
+
+# Referencias
+
+Jara, J. L., & Köhler, J. (s. f.). Inferencia y modelos estadísticos [Perusall].

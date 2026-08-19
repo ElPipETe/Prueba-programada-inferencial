@@ -1,0 +1,703 @@
+---
+title: "EP11-respuesta-equipo-7"
+date: "2026-08-11"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center",
+  fig.width = 7,
+  fig.height = 5
+)
+
+library(leaps)
+library(caret)
+library(pROC)
+library(car)
+library(lmtest)
+
+options(scipen = 999)
+
+formato <- function(x, digitos = 3) {
+  sub(".", ",", formatC(x, format = "f", digits = digitos), fixed = TRUE)
+}
+
+# car::vif() entrega VIF para términos de un grado de libertad y puede
+# entregar una matriz con GVIF para factores con más grados de libertad.
+obtener_vif <- function(modelo) {
+  resultado <- car::vif(modelo)
+
+  if (is.matrix(resultado) &&
+      "GVIF^(1/(2*Df))" %in% colnames(resultado)) {
+    return(resultado[, "GVIF^(1/(2*Df))"])
+  }
+
+  resultado
+}
+```
+
+# Preparación de los datos
+
+Se utilizan los datos de medidas anatómicas de Heinz et al. (2003). La
+variable IMC se calcula como el peso en kg dividido por la estatura en metros
+al cuadrado. Siguiendo el criterio utilizado en el ejercicio anterior, se
+clasifica como **sobrepeso** a una persona con IMC mayor o igual a 23,2 y como
+**no sobrepeso** en caso contrario.
+
+```{r datos}
+# Esta ruta permite ejecutar el archivo desde EP11 o desde una carpeta que
+# ya contenga una copia de los datos.
+ruta_datos <- if (file.exists("EP09 Datos.csv")) {
+  "EP09 Datos.csv"
+} else {
+  file.path("..", "EP09", "EP09 Datos.csv")
+}
+
+datos <- read.csv2(ruta_datos)
+datos$ID_original <- seq_len(nrow(datos))
+datos$IMC <- datos$Weight / (datos$Height / 100)^2
+
+# Se deja "sobrepeso" como primer nivel, pues caret lo considera la clase
+# de interés al calcular ROC, sensibilidad y especificidad.
+datos$EN <- factor(
+  ifelse(datos$IMC >= 23.2, "sobrepeso", "no_sobrepeso"),
+  levels = c("sobrepeso", "no_sobrepeso")
+)
+
+stopifnot(
+  nrow(datos) == 507,
+  all(c("Weight", "Height", "Gender", "IMC", "EN") %in% names(datos)),
+  !anyNA(datos)
+)
+
+cat("Dimensiones de los datos:", dim(datos), "\n")
+cat("Distribución del estado nutricional:\n")
+print(table(datos$EN))
+```
+
+# Semilla y muestra balanceada
+
+La semilla definitiva indicada para el equipo corresponde a **19671**. Se seleccionan
+50 personas al azar dentro de cada estado nutricional y luego se mezcla el
+orden de las filas. El muestreo estratificado asegura exactamente el balance
+solicitado, mientras que la semilla permite reproducir la misma muestra.
+
+```{r muestra}
+semilla <- 19671
+set.seed(semilla)
+
+id_sobrepeso <- sample(which(datos$EN == "sobrepeso"), 50)
+id_no_sobrepeso <- sample(which(datos$EN == "no_sobrepeso"), 50)
+
+muestra <- datos[c(id_sobrepeso, id_no_sobrepeso), ]
+muestra <- muestra[sample(seq_len(nrow(muestra))), ]
+row.names(muestra) <- NULL
+
+cat("Tamaño de la muestra:", nrow(muestra), "personas\n")
+print(table(muestra$EN))
+cat("Identificadores originales repetidos:",
+    anyDuplicated(muestra$ID_original), "\n")
+
+independencia_diseno <-
+  nrow(muestra) == length(unique(muestra$ID_original))
+cat("Una sola fila por persona:", independencia_diseno, "\n")
+```
+
+La muestra contiene 100 personas distintas, 50 en cada clase. Este balance
+es útil para comparar sensibilidad y especificidad, pero no reproduce
+necesariamente la prevalencia de sobrepeso de otra población. Por ello, la
+generalización de los modelos queda limitada a personas comparables con las
+del conjunto de datos original.
+
+La independencia de las observaciones se sustenta en el diseño: cada fila
+corresponde a una persona diferente, los identificadores no se repiten y el
+muestreo dentro de cada estrato se hizo sin reemplazo. No hay medidas repetidas
+ni una secuencia temporal. Esta condición es común a los tres modelos. No se
+aplica Durbin--Watson porque esa prueba evalúa autocorrelación según un orden
+serial; aquí el orden de las filas es arbitrario y fue mezclado al construir la
+muestra, por lo que su resultado no sería evidencia válida de independencia.
+
+# Modelo de regresión lineal múltiple para Peso
+
+## Selección exhaustiva con `leaps`
+
+Se consideran como candidatos todos los predictores originales, incluida la
+estatura, pero se excluyen la respuesta `Weight`, las variables derivadas IMC
+y EN, y el identificador creado para seguimiento. `regsubsets()` busca en
+forma exhaustiva el mejor subconjunto para cada tamaño. Entre dos y ocho
+predictores se elige el de menor BIC, pues este criterio recompensa el ajuste
+y penaliza la complejidad.
+
+```{r peso-leaps}
+predictores_candidatos_peso <- setdiff(
+  names(muestra), c("ID_original", "Weight", "IMC", "EN")
+)
+
+busqueda_peso <- regsubsets(
+  x = muestra[, predictores_candidatos_peso],
+  y = muestra$Weight,
+  nvmax = 8,
+  method = "exhaustive",
+  really.big = TRUE
+)
+
+resumen_peso <- summary(busqueda_peso)
+tamanos_peso <- 2:8
+
+tabla_peso <- data.frame(
+  Predictores = tamanos_peso,
+  R2_ajustado = resumen_peso$adjr2[tamanos_peso],
+  Cp = resumen_peso$cp[tamanos_peso],
+  BIC = resumen_peso$bic[tamanos_peso]
+)
+knitr::kable(tabla_peso, digits = 3)
+
+tamano_peso <- tamanos_peso[which.min(resumen_peso$bic[tamanos_peso])]
+predictores_peso <- names(coef(busqueda_peso, id = tamano_peso))[-1]
+
+cat("Tamaño elegido:", tamano_peso, "predictores\n")
+cat("Predictores elegidos:\n")
+print(predictores_peso)
+
+plot(tabla_peso$Predictores, tabla_peso$BIC, type = "b", pch = 19,
+     xlab = "Número de predictores", ylab = "BIC",
+     main = "Selección exhaustiva para Peso")
+points(tamano_peso, min(tabla_peso$BIC), col = "red", pch = 19, cex = 1.4)
+```
+
+El BIC mínimo se obtiene con `r tamano_peso` predictores:
+`r paste(predictores_peso, collapse = ", ")`. Por ello se selecciona ese
+subconjunto dentro del intervalo permitido.
+
+## Construcción y evaluación mediante bootstrap
+
+El modelo se ajusta con `caret::train()` y 999 remuestras bootstrap. En cada
+remuestra se entrena con los casos seleccionados con reemplazo y se evalúa en
+los casos que quedan fuera, de modo que las métricas no correspondan solo al
+ajuste aparente de los mismos 100 datos.
+
+```{r peso-bootstrap}
+formula_peso <- reformulate(predictores_peso, response = "Weight")
+
+control_boot <- trainControl(
+  method = "boot",
+  number = 999,
+  returnResamp = "final",
+  allowParallel = FALSE
+)
+
+set.seed(semilla)
+modelo_peso_caret <- train(
+  formula_peso,
+  data = muestra,
+  method = "lm",
+  metric = "RMSE",
+  trControl = control_boot
+)
+
+metricas_peso <- modelo_peso_caret$results[1, ]
+modelo_peso <- modelo_peso_caret$finalModel
+rmse_boot_peso <- quantile(
+  modelo_peso_caret$resample$RMSE,
+  probs = c(0.025, 0.5, 0.975),
+  na.rm = TRUE
+)
+
+print(modelo_peso_caret)
+cat("Cuantiles 2,5%, 50% y 97,5% del RMSE bootstrap:\n")
+print(rmse_boot_peso)
+```
+
+El desempeño fuera de remuestra alcanza un RMSE promedio de
+`r formato(metricas_peso$RMSE)` kg, MAE de `r formato(metricas_peso$MAE)` kg y
+$R^2$ de `r formato(metricas_peso$Rsquared)`. La mitad de las remuestras tuvo
+un RMSE menor o igual a `r formato(rmse_boot_peso[2])` kg, y el 95% central de
+los RMSE quedó aproximadamente entre `r formato(rmse_boot_peso[1])` y
+`r formato(rmse_boot_peso[3])` kg. Por tanto, el buen ajuste no depende de una
+única partición de los datos.
+
+## Bondad de ajuste y condiciones
+
+```{r peso-diagnosticos, fig.width=8, fig.height=7}
+resumen_modelo_peso <- summary(modelo_peso)
+shapiro_peso <- shapiro.test(residuals(modelo_peso))
+bp_peso <- bptest(modelo_peso)
+reset_peso <- resettest(modelo_peso, power = 2:3, type = "fitted")
+vif_peso <- obtener_vif(modelo_peso)
+cook_peso <- cooks.distance(modelo_peso)
+influyentes_peso <- which(cook_peso > 4 / nrow(muestra))
+
+cat("R2 ajustado en la muestra:", resumen_modelo_peso$adj.r.squared, "\n")
+cat("Shapiro-Wilk p =", shapiro_peso$p.value, "\n")
+cat("Breusch-Pagan p =", bp_peso$p.value, "\n")
+cat("RESET p =", reset_peso$p.value, "\n")
+cat("VIF:\n")
+print(vif_peso)
+cat("Casos con Cook > 4/n:", length(influyentes_peso), "\n")
+cat("Mayor distancia de Cook:", max(cook_peso), "\n")
+
+par(mfrow = c(2, 2))
+plot(modelo_peso)
+par(mfrow = c(1, 1))
+```
+
+La relación global es fuerte ($R^2$ ajustado =
+`r formato(resumen_modelo_peso$adj.r.squared)`) y se dispone de unas
+`r formato(nrow(muestra) / tamano_peso, 1)` observaciones por predictor. Sin
+embargo, los diagnósticos advierten limitaciones: Shapiro-Wilk entrega
+$p=$ `r formato(shapiro_peso$p.value, 4)`, Breusch-Pagan
+$p=$ `r formato(bp_peso$p.value, 4)` y RESET
+$p=$ `r formato(reset_peso$p.value, 5)`. Shapiro-Wilk y Breusch-Pagan no
+entregan evidencia contra la normalidad ni la homocedasticidad, respectivamente;
+sin embargo, RESET sí detecta una falta de linealidad. El
+VIF máximo es `r formato(max(vif_peso), 2)`, moderado pero menor que 10, y
+`r length(influyentes_peso)` casos superan el umbral exploratorio de Cook
+$4/n$; ninguno alcanza Cook = 1.
+
+No se eliminan automáticamente esos casos, porque no existe evidencia de que
+sean errores de registro. La acción apropiada es conservarlos, basar el juicio
+predictivo en el bootstrap y limitar la interpretación de coeficientes y
+valores p: el modelo predice bien, pero sus errores estándar clásicos pueden
+ser menos confiables y la extrapolación fuera de los rangos observados no es
+aconsejable.
+
+# Modelo de regresión lineal múltiple para IMC
+
+## Selección con RFE y validación cruzada repetida
+
+Se excluyen `Weight`, `Height` y EN porque las dos primeras definen
+directamente el IMC y la última se obtiene a partir de él. Se usa RFE con
+cinco repeticiones de validación cruzada de cinco pliegues. La función de
+selección se restringe explícitamente a tamaños entre 10 y 20, ya que `rfe()`
+también evalúa, como referencia, el conjunto completo de predictores aunque
+este quede fuera del rango solicitado.
+
+```{r imc-rfe}
+predictores_candidatos_imc <- setdiff(
+  names(muestra), c("ID_original", "IMC", "EN", "Weight", "Height")
+)
+
+funciones_imc <- lmFuncs
+funciones_imc$selectSize <- function(x, metric, maximize) {
+  x <- x[x$Variables >= 10 & x$Variables <= 20, , drop = FALSE]
+  mejor <- if (maximize) which.max(x[[metric]]) else which.min(x[[metric]])
+  min(x$Variables[mejor])
+}
+
+control_rfe_imc <- rfeControl(
+  functions = funciones_imc,
+  method = "repeatedcv",
+  number = 5,
+  repeats = 5,
+  returnResamp = "final",
+  saveDetails = TRUE,
+  allowParallel = FALSE
+)
+
+set.seed(semilla)
+rfe_imc <- rfe(
+  x = muestra[, predictores_candidatos_imc],
+  y = muestra$IMC,
+  sizes = 10:20,
+  metric = "Rsquared",
+  rfeControl = control_rfe_imc
+)
+
+resultados_imc <- rfe_imc$results[
+  rfe_imc$results$Variables >= 10 & rfe_imc$results$Variables <= 20,
+]
+predictores_imc <- predictors(rfe_imc)
+tamano_imc <- rfe_imc$optsize
+fila_imc <- resultados_imc[resultados_imc$Variables == tamano_imc, ]
+
+knitr::kable(resultados_imc, digits = 3)
+cat("Tamaño elegido:", tamano_imc, "predictores\n")
+cat("Predictores elegidos:\n")
+print(predictores_imc)
+
+plot(resultados_imc$Variables, resultados_imc$Rsquared,
+     type = "b", pch = 19,
+     xlab = "Número de predictores", ylab = "R2 validado",
+     main = "RFE para IMC: CV repetida 5 x 5")
+points(tamano_imc, fila_imc$Rsquared, col = "red", pch = 19, cex = 1.4)
+```
+
+Dentro del intervalo exigido, RFE maximiza el $R^2$ con
+`r tamano_imc` predictores. El desempeño validado es $R^2=$
+`r formato(fila_imc$Rsquared)`, RMSE = `r formato(fila_imc$RMSE)` unidades de
+IMC y MAE = `r formato(fila_imc$MAE)`. Aunque las diferencias entre tamaños
+cercanos son pequeñas, se conserva este tamaño porque el enunciado pide
+maximizar $R^2$, no aplicar la regla del modelo más pequeño dentro de un error
+estándar.
+
+## Modelo final, ajuste y condiciones
+
+```{r imc-diagnosticos, fig.width=8, fig.height=7}
+formula_imc <- reformulate(predictores_imc, response = "IMC")
+modelo_imc <- lm(formula_imc, data = muestra)
+
+resumen_modelo_imc <- summary(modelo_imc)
+shapiro_imc <- shapiro.test(residuals(modelo_imc))
+bp_imc <- bptest(modelo_imc)
+reset_imc <- resettest(modelo_imc, power = 2:3, type = "fitted")
+vif_imc <- obtener_vif(modelo_imc)
+cook_imc <- cooks.distance(modelo_imc)
+influyentes_imc <- which(cook_imc > 4 / nrow(muestra))
+rmse_cv_imc <- quantile(
+  rfe_imc$resample$RMSE,
+  probs = c(0.025, 0.5, 0.975),
+  na.rm = TRUE
+)
+
+cat("R2 ajustado en la muestra:", resumen_modelo_imc$adj.r.squared, "\n")
+cat("Shapiro-Wilk p =", shapiro_imc$p.value, "\n")
+cat("Breusch-Pagan p =", bp_imc$p.value, "\n")
+cat("RESET p =", reset_imc$p.value, "\n")
+cat("VIF máximo:", max(vif_imc), "\n")
+cat("Casos con Cook > 4/n:", length(influyentes_imc), "\n")
+cat("Cuantiles 2,5%, 50% y 97,5% del RMSE entre remuestras:\n")
+print(rmse_cv_imc)
+
+par(mfrow = c(2, 2))
+plot(modelo_imc)
+par(mfrow = c(1, 1))
+```
+
+El ajuste dentro de la muestra ($R^2$ ajustado =
+`r formato(resumen_modelo_imc$adj.r.squared)`) es mayor que el $R^2$ validado,
+como es esperable. Shapiro-Wilk no detecta una desviación clara de normalidad
+($p=$ `r formato(shapiro_imc$p.value, 3)`) y Breusch-Pagan no rechaza la
+homocedasticidad al 5% ($p=$ `r formato(bp_imc$p.value, 3)`). En cambio, RESET
+sí detecta falta de linealidad ($p=$ `r formato(reset_imc$p.value, 3)`).
+Además, el VIF máximo de
+`r formato(max(vif_imc), 1)` muestra multicolinealidad importante y solo hay
+`r formato(nrow(muestra) / tamano_imc, 1)` observaciones por predictor.
+
+En consecuencia, el modelo es útil para predecir dentro del dominio observado,
+pero no es confiable para interpretar efectos individuales. Se mantienen los
+`r tamano_imc` predictores porque fueron exigidos por el criterio de máximo
+$R^2$ validado;
+se informa la multicolinealidad y no se eliminan los
+`r length(influyentes_imc)` casos con Cook mayor que $4/n$ sin evidencia de
+error. El 95% central de los RMSE de las 25 remuestras va aproximadamente de
+`r formato(rmse_cv_imc[1])` a `r formato(rmse_cv_imc[3])`, lo que confirma que
+el error cambia según la partición y justifica haber repetido la validación.
+
+# Modelo de regresión logística múltiple para EN
+
+## RFE con validación cruzada dejando uno fuera
+
+Se excluyen `Weight`, `Height` e IMC para evitar fuga directa de información.
+La búsqueda evalúa entre dos y seis predictores y maximiza el área bajo la
+curva ROC. La validación externa de RFE es LOOCV: cada persona actúa una vez
+como dato no usado para ajustar el modelo ni para ordenar los predictores de
+esa iteración.
+
+```{r en-rfe}
+predictores_candidatos_en <- setdiff(
+  names(muestra), c("ID_original", "EN", "Weight", "Height", "IMC")
+)
+
+funciones_en <- caretFuncs
+funciones_en$summary <- twoClassSummary
+funciones_en$selectSize <- function(x, metric, maximize) {
+  x <- x[x$Variables >= 2 & x$Variables <= 6, , drop = FALSE]
+  mejor <- if (maximize) which.max(x[[metric]]) else which.min(x[[metric]])
+  min(x$Variables[mejor])
+}
+
+control_interno_en <- trainControl(
+  method = "none",
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  allowParallel = FALSE
+)
+
+control_rfe_en <- rfeControl(
+  functions = funciones_en,
+  method = "LOOCV",
+  returnResamp = "final",
+  allowParallel = FALSE
+)
+
+set.seed(semilla)
+# Los avisos repetidos de los cientos de ajustes internos se silencian para no
+# saturar el informe. El GLM final se vuelve a ajustar sin suppressWarnings()
+# en la sección de diagnósticos y con warning=TRUE.
+rfe_en <- suppressWarnings(
+  rfe(
+    x = muestra[, predictores_candidatos_en],
+    y = muestra$EN,
+    sizes = 2:6,
+    metric = "ROC",
+    rfeControl = control_rfe_en,
+    method = "glm",
+    family = binomial,
+    trControl = control_interno_en
+  )
+)
+
+resultados_en <- rfe_en$results[
+  rfe_en$results$Variables >= 2 & rfe_en$results$Variables <= 6,
+]
+predictores_en <- predictors(rfe_en)
+tamano_en <- rfe_en$optsize
+fila_en <- resultados_en[resultados_en$Variables == tamano_en, ]
+
+knitr::kable(resultados_en, digits = 3)
+cat("Tamaño elegido:", tamano_en, "predictores\n")
+cat("Predictores elegidos:\n")
+print(predictores_en)
+
+plot(resultados_en$Variables, resultados_en$ROC,
+     type = "b", pch = 19, ylim = range(resultados_en$ROC),
+     xlab = "Número de predictores", ylab = "Área bajo la curva ROC",
+     main = "RFE para EN con LOOCV")
+points(tamano_en, fila_en$ROC, col = "red", pch = 19, cex = 1.4)
+```
+
+El mejor procedimiento usa `r tamano_en` predictores:
+`r paste(predictores_en, collapse = ", ")`. Su ROC LOOCV es
+`r formato(fila_en$ROC)`, con sensibilidad `r formato(fila_en$Sens)` y
+especificidad `r formato(fila_en$Spec)`. El mejor ROC validado se obtiene con
+`r tamano_en` predictores; agregar variables después de este punto no mejora el
+criterio de selección obtenido mediante LOOCV.
+
+## Curva ROC y clasificación del modelo final
+
+Para mostrar una curva y una matriz de confusión se vuelve a estimar mediante
+LOOCV el modelo con el conjunto final fijo. Esta evaluación es secundaria: el
+subconjunto ya fue escogido usando la muestra completa. Para juzgar el proceso
+completo selección más ajuste se conserva como estimación principal el ROC de
+RFE informado arriba.
+
+```{r en-loocv-final, fig.width=7, fig.height=5}
+formula_en <- reformulate(predictores_en, response = "EN")
+
+control_loocv_en <- trainControl(
+  method = "LOOCV",
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final",
+  allowParallel = FALSE
+)
+
+set.seed(semilla)
+# En LOOCV se realizan 100 ajustes y los avisos repetidos se omiten aquí. El
+# ajuste final sobre la muestra completa se revisa de forma visible más abajo.
+modelo_en_caret <- suppressWarnings(
+  train(
+    formula_en,
+    data = muestra,
+    method = "glm",
+    family = binomial,
+    metric = "ROC",
+    trControl = control_loocv_en
+  )
+)
+
+roc_en_fijo <- pROC::roc(
+  response = modelo_en_caret$pred$obs,
+  predictor = modelo_en_caret$pred$sobrepeso,
+  levels = c("no_sobrepeso", "sobrepeso"),
+  direction = "<",
+  quiet = TRUE
+)
+
+matriz_en <- confusionMatrix(
+  modelo_en_caret$pred$pred,
+  modelo_en_caret$pred$obs,
+  positive = "sobrepeso"
+)
+
+brier_en <- mean(
+  (ifelse(modelo_en_caret$pred$obs == "sobrepeso", 1, 0) -
+     modelo_en_caret$pred$sobrepeso)^2
+)
+
+plot(roc_en_fijo, col = "#007C91", lwd = 2,
+     main = "Curva ROC LOOCV del conjunto final fijo")
+abline(a = 0, b = 1, lty = 2, col = "gray50")
+legend("bottomright",
+       legend = paste("AUC =", formato(as.numeric(auc(roc_en_fijo)))),
+       bty = "n")
+
+print(matriz_en)
+cat("Brier LOOCV:", brier_en, "\n")
+```
+
+Con el umbral 0,5, el modelo fijo clasifica correctamente
+`r formato(matriz_en$overall["Accuracy"] * 100, 1)`% de los casos dejados
+fuera, con sensibilidad `r formato(matriz_en$byClass["Sensitivity"])` y
+especificidad `r formato(matriz_en$byClass["Specificity"])`. Su AUC es
+`r formato(as.numeric(auc(roc_en_fijo)))` y el puntaje de Brier es
+`r formato(brier_en)`, donde valores menores indican mejores probabilidades.
+La similitud entre sensibilidad y especificidad muestra que el clasificador no
+favorece fuertemente una de las dos clases en esta muestra balanceada.
+
+## Bondad de ajuste y condiciones
+
+```{r en-diagnosticos, warning=TRUE}
+# Se capturan y muestran explícitamente los avisos de cada GLM para distinguir
+# los del modelo final de los que pueda producir el diagnóstico ampliado.
+ajustar_glm_con_avisos <- function(formula, datos) {
+  avisos <- character()
+  modelo <- withCallingHandlers(
+    glm(formula, data = datos, family = binomial),
+    warning = function(w) {
+      avisos <<- c(avisos, conditionMessage(w))
+      invokeRestart("muffleWarning")
+    }
+  )
+  list(modelo = modelo, avisos = unique(avisos))
+}
+
+ajuste_en_visible <- ajustar_glm_con_avisos(formula_en, muestra)
+modelo_en <- ajuste_en_visible$modelo
+avisos_modelo_en <- ajuste_en_visible$avisos
+modelo_en_nulo <- glm(EN ~ 1, data = muestra, family = binomial)
+lrt_en <- anova(modelo_en_nulo, modelo_en, test = "LRT")
+vif_en <- obtener_vif(modelo_en)
+cook_en <- cooks.distance(modelo_en)
+influyentes_en <- which(cook_en > 4 / nrow(muestra))
+
+# Prueba conjunta tipo Box-Tidwell para linealidad de los predictores
+# continuos con el logit. Gender es dicotómica y no se transforma.
+continuos_en <- setdiff(predictores_en, "Gender")
+muestra_bt <- muestra
+terminos_bt <- character()
+for (variable in continuos_en) {
+  nombre_bt <- paste0("BT_", variable)
+  muestra_bt[[nombre_bt]] <- muestra_bt[[variable]] * log(muestra_bt[[variable]])
+  terminos_bt <- c(terminos_bt, nombre_bt)
+}
+
+ajuste_en_bt <- ajustar_glm_con_avisos(
+  reformulate(c(predictores_en, terminos_bt), response = "EN"),
+  muestra_bt
+)
+modelo_en_bt <- ajuste_en_bt$modelo
+avisos_modelo_en_bt <- ajuste_en_bt$avisos
+linealidad_en <- anova(modelo_en, modelo_en_bt, test = "LRT")
+
+eventos_por_variable <- min(table(muestra$EN)) / length(predictores_en)
+probabilidades_extremas <- sum(
+  fitted(modelo_en) < 0.01 | fitted(modelo_en) > 0.99
+)
+coeficientes_finitos <- all(is.finite(coef(modelo_en)))
+errores_estandar_finitos <- all(is.finite(sqrt(diag(vcov(modelo_en)))))
+coeficiente_maximo <- max(abs(coef(modelo_en)[-1]))
+
+cat("Prueba global contra el modelo nulo:\n")
+print(lrt_en)
+cat("Avisos del modelo EN final:\n")
+print(if (length(avisos_modelo_en) == 0) "Ninguno" else avisos_modelo_en)
+cat("Avisos del modelo ampliado de Box-Tidwell:\n")
+print(if (length(avisos_modelo_en_bt) == 0) "Ninguno" else avisos_modelo_en_bt)
+cat("Prueba conjunta de linealidad con el logit:\n")
+print(linealidad_en)
+cat("VIF:\n")
+print(vif_en)
+cat("Eventos por predictor:", eventos_por_variable, "\n")
+cat("Convergencia:", modelo_en$converged, "\n")
+cat("Coeficientes finitos:", coeficientes_finitos, "\n")
+cat("Errores estándar finitos:", errores_estandar_finitos, "\n")
+cat("Mayor coeficiente predictor en valor absoluto:", coeficiente_maximo, "\n")
+cat("Probabilidades ajustadas menores a 0,01 o mayores a 0,99:",
+    probabilidades_extremas, "\n")
+cat("Casos con Cook > 4/n:", length(influyentes_en), "\n")
+cat("Mayor distancia de Cook:", max(cook_en), "\n")
+```
+
+El modelo completo mejora al modelo nulo ($\chi^2=$
+`r formato(lrt_en$Deviance[2], 2)`, $gl=$ `r lrt_en$Df[2]`,
+$p<$ 0,001). La prueba conjunta de los términos de Box-Tidwell entrega
+$p=$ `r formato(linealidad_en[["Pr(>Chi)"]][2], 3)`, por lo que no rechaza la
+linealidad con el logit. Sin embargo, el modelo ampliado usado por esta prueba
+emitió el aviso "`r paste(avisos_modelo_en_bt, collapse = "; ")`"; por ello,
+este resultado no se interpreta como una demostración concluyente de
+linealidad. El VIF máximo es
+`r formato(max(vif_en), 2)` y se alcanzan
+`r formato(eventos_por_variable, 1)` eventos de la clase menos frecuente por
+predictor, lo que alcanza el umbral usual de 10.
+
+El ajuste final converge, sus coeficientes y errores estándar son finitos, y el
+modelo final directo reporta `r length(avisos_modelo_en)` avisos. El mayor
+coeficiente predictor en valor absoluto es `r formato(coeficiente_maximo, 2)`.
+Estas comprobaciones no muestran una separación perfecta manifiesta, pero no
+descartan cuasiseparación: existen `r probabilidades_extremas` probabilidades
+muy cercanas a 0 o 1 y `r length(influyentes_en)` casos superan Cook $4/n$.
+Por ello se interpretan los coeficientes con cautela y no se eliminan
+observaciones válidas. La ROC LOOCV del procedimiento completo es la evidencia
+más defendible de su capacidad de clasificación.
+
+# Conclusión
+
+```{r resumen-final}
+tabla_final <- data.frame(
+  Modelo = c("Peso", "IMC", "EN"),
+  Seleccion = c("Exhaustiva, menor BIC", "RFE, máximo R2", "RFE, máximo ROC"),
+  Remuestreo = c("Bootstrap, 999", "CV 5 pliegues x 5", "LOOCV"),
+  Predictores = c(tamano_peso, tamano_imc, tamano_en),
+  Metrica_principal = c(
+    paste0("R2 = ", formato(metricas_peso$Rsquared),
+           "; RMSE = ", formato(metricas_peso$RMSE), " kg"),
+    paste0("R2 = ", formato(fila_imc$Rsquared),
+           "; RMSE = ", formato(fila_imc$RMSE)),
+    paste0("ROC = ", formato(fila_en$ROC),
+           "; Sens/Spec = ", formato(fila_en$Sens), "/",
+           formato(fila_en$Spec))
+  )
+)
+knitr::kable(tabla_final)
+```
+
+Los tres procedimientos presentan desempeño predictivo evaluado mediante
+remuestreo, aunque sus métricas no son directamente comparables porque estiman
+respuestas diferentes y su confiabilidad no es equivalente.
+
+Para **Peso**, el modelo seleccionado mediante búsqueda exhaustiva obtiene un
+$R^2$ bootstrap de `r formato(metricas_peso$Rsquared)` y un RMSE de
+`r formato(metricas_peso$RMSE)` kg. La normalidad y homocedasticidad de los
+residuos parecen razonables, pero RESET evidencia falta de linealidad. Su
+capacidad predictiva puede ser útil dentro del rango observado, aunque el
+incumplimiento de esta condición limita la interpretación de sus coeficientes.
+
+Para **IMC**, RFE selecciona `r tamano_imc` predictores y obtiene un $R^2$
+validado de `r formato(fila_imc$Rsquared)` y RMSE de
+`r formato(fila_imc$RMSE)`. La falta de linealidad, la multicolinealidad y la
+baja razón entre observaciones y predictores limitan la estabilidad e
+interpretación del modelo. Su desempeño predictivo es prometedor dentro del
+dominio estudiado, pero su confiabilidad inferencial es limitada.
+
+Para **EN**, RFE selecciona `r tamano_en` predictores con un AUC LOOCV de
+`r formato(fila_en$ROC)`. La prueba no rechaza la linealidad con el logit y la
+multicolinealidad no es severa, pero el aviso del modelo ampliado de
+Box--Tidwell, las probabilidades extremas y los casos influyentes obligan a
+mantener cautela. El AUC obtenido mediante LOOCV constituye la principal
+evidencia de su capacidad de clasificación.
+
+En los tres casos, las conclusiones se restringen a personas comparables con
+las de la muestra estudiada. Como la muestra fue balanceada artificialmente
+por estado nutricional, antes de utilizar los modelos en una aplicación real
+se requeriría validación externa con una muestra mayor y con la prevalencia
+natural de las clases. Los resultados no justifican interpretaciones causales
+ni extrapolaciones fuera de los rangos observados.
+
+# Referencias
+
+- Heinz, G., Peterson, L. J., Johnson, R. W. y Kerk, C. J. (2003).
+  *Exploring relationships in body dimensions*. Journal of Statistics
+  Education, 11(2).
+- Kuhn, M. (2008). *Building predictive models in R using the caret package*.
+  Journal of Statistical Software, 28(5).
+- Lumley, T. (2025). *leaps: Regression subset selection*. Manual del paquete
+  de R.
